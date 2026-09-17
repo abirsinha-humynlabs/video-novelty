@@ -1,0 +1,31 @@
+# Labelled pairs for `novelty calibrate --labels eval/pairs.yaml`.
+#
+# `a` and `b` are BASENAMES of files that are already in the index.
+# `same_env`  : do these show the same physical place / setup?
+# `same_task` : is the same kind of work happening?
+#
+# ---------------------------------------------------------------------------
+# HONEST WARNING ABOUT THIS FILE
+# ---------------------------------------------------------------------------
+# The shipped pairs cover only two of the four quadrants:
+#
+#     same_env + same_task      (the three factory clips against each other)
+#     diff_env + diff_task      (any factory clip vs the construction clip)
+#
+# That is enough to show the pipeline runs and that the ENVIRONMENT axis
+# separates. It is NOT enough to validate the TASK axis, because no pair
+# differs on task while holding environment fixed -- so a model that ignores
+# motion entirely would still score a perfect AUC on this file.
+#
+# To actually test the task tier you must add pairs from the
+# SAME_PLACE_NEW_TASK quadrant: two recordings in one room, doing different
+# work. Record ten minutes of sorting and ten minutes of sweeping in the same
+# corner and label them `same_env: true, same_task: false`. Until that exists,
+# treat every task-axis number this repo prints as unvalidated.
+pairs:
+  - {a: clipA_040-100.mp4,      b: clipB_100-160.mp4,        same_env: true,  same_task: true}
+  - {a: clipA_040-100.mp4,      b: clipC_v5_400-460.mp4,     same_env: true,  same_task: true}
+  - {a: clipB_100-160.mp4,      b: clipC_v5_400-460.mp4,     same_env: true,  same_task: true}
+  - {a: clipA_040-100.mp4,      b: clipD_front_040-100.mp4,  same_env: false, same_task: false}
+  - {a: clipB_100-160.mp4,      b: clipD_front_040-100.mp4,  same_env: false, same_task: false}
+  - {a: clipC_v5_400-460.mp4,   b: clipD_front_040-100.mp4,  same_env: false, same_task: false}

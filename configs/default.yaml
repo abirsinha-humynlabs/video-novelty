@@ -1,0 +1,40 @@
+# CPU / no-weights preset.
+#
+# Runs on any machine with ffmpeg and OpenCV. Nothing is downloaded.
+# The environment tier is genuinely usable here; the task tier is weak --
+# see docs/06-running-on-gpu.md for what changes when you add a backbone.
+appearance:
+  encoder: gist
+  n_frames: 48
+  width: 384
+  height: 216
+  letterbox: true
+  static_mask: true          # suppress the wearer's own body (egocentric footage)
+  static_percentile: 20.0
+  static_floor: 0.15
+  bottom_crop: 0.0
+
+motion:
+  enabled: true
+  fps: 10.0
+  width: 160
+  height: 90
+  max_seq: 256
+  backend: farneback
+  smooth_s: 0.5
+  clip_encoder: null
+
+hashing:
+  enabled: true
+  fps: 2.0
+  max_hamming: 8
+  min_overlap_seconds: 2.0
+
+decision:
+  env_percentile: 97.0
+  task_percentile: 95.0
+
+segment:
+  seconds: 30.0              # window long files; 0 = one signature per file
+  hop: 15.0
+  drop_last_shorter_than: 5.0

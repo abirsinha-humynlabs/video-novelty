@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# index + artefacts
+.novelty/
+*.npz
+null.json
+novelty-report.html
+selection.json
+
+# demo media (big; regenerate with scripts/prepare_eval_clips.sh)
+data/
+*.mp4
+*.mov
+*.mkv
