@@ -18,7 +18,11 @@ dependencies = [
 
 [project.optional-dependencies]
 # Learned backbones. Install this on the GPU box; the repo runs without it.
-gpu = ["torch>=2.1", "transformers>=4.45", "scikit-learn>=1.2"]
+# pillow: HF AutoImageProcessor hard-requires it; torchvision: AutoVideoProcessor
+# (V-JEPA 2) hard-requires it; einops: Cosmos-Embed1's trust_remote_code modeling
+# file imports it. None are pulled in by torch/transformers alone.
+gpu = ["torch>=2.1", "torchvision>=0.16", "transformers>=4.45", "scikit-learn>=1.2",
+       "pillow>=10.0", "einops>=0.7"]
 # Supervised threshold/weight fitting (`novelty calibrate --labels`).
 fit = ["scikit-learn>=1.2"]
 # Approximate nearest neighbour, for corpora past ~1e5 signatures.

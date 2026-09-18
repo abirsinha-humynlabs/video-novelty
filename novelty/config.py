@@ -59,12 +59,25 @@ class HashConfig:
 class DecisionConfig:
     """Operating points, expressed as percentiles of the corpus null distribution.
 
-    Read that twice: they are NOT raw cosine thresholds. "env_percentile: 97"
-    means "closer in appearance than 97% of random pairs drawn from YOUR
+    Read that twice: they are NOT raw cosine thresholds. "env_percentile: 52"
+    means "closer in appearance than 52% of random pairs drawn from YOUR
     corpus". That is the only way a threshold survives moving from a factory
     dataset to a kitchen dataset. See docs/04-calibration.md.
+
+    The right value tracks how redundant your corpus already is. A percentile
+    threshold asks "is this pair in the top (100-p)% of my corpus", so it only
+    means "same environment" when same-environment pairs are about that rare.
+    52 is the best-F1 operating point measured on two Pipe_Factory sessions
+    (AUC 0.998, 4.4 sigma) where 49% of pairs were same-environment. Feed in
+    twenty sessions and the same-environment base rate falls, so re-fit it --
+    `calibrate --labels` prints the best-F1 percentile for exactly this reason.
+
+    task_percentile is NOT similarly measured. Every labelled pair available so
+    far varies environment and task together, so any task number is confounded
+    (WORK.md section 6). 95 is a deliberately conservative placeholder: it makes
+    REDUNDANT hard to reach, which is the safe direction to be wrong in.
     """
-    env_percentile: float = 97.0
+    env_percentile: float = 52.0
     task_percentile: float = 95.0
 
 

@@ -1,0 +1,38 @@
+appearance:
+  encoder: dinov2
+  n_frames: 64
+  width: 448
+  height: 252
+  letterbox: true
+  static_mask: true
+  static_percentile: 20.0
+  static_floor: 0.15
+  bottom_crop: 0.0
+  encoder_kwargs:
+    batch_size: 64
+    dtype: float16
+motion:
+  enabled: true
+  fps: 12.0
+  width: 224
+  height: 126
+  max_seq: 384
+  backend: farneback
+  letterbox: true
+  smooth_s: 0.5
+  clip_encoder: vjepa2
+  clip_encoder_kwargs:
+    batch_size: 8
+    fps: 8.0
+hashing:
+  enabled: true
+  fps: 2.0
+  max_hamming: 8
+  min_overlap_seconds: 2.0
+decision:
+  env_percentile: 52.0
+  task_percentile: 95.0
+segment:
+  seconds: 30.0
+  hop: 30.0
+  drop_last_shorter_than: 5.0

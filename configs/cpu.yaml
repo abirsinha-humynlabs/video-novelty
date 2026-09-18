@@ -31,7 +31,11 @@ hashing:
   min_overlap_seconds: 2.0
 
 decision:
-  env_percentile: 97.0
+  # 52 = best-F1 operating point measured on two Pipe_Factory sessions
+  # (DINOv2, AUC 0.998, 4.4 sigma). It is tied to that corpus being 49%
+  # same-environment pairs -- add sessions and re-fit with
+  # `calibrate --labels`, which prints the best-F1 percentile.
+  env_percentile: 52.0
   task_percentile: 95.0
 
 segment:

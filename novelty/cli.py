@@ -26,7 +26,7 @@ import numpy as np
 from .calibrate import ENV_COMPONENTS, TASK_COMPONENTS, evaluate_axis, fit_null, fit_weights
 from .config import Config
 from .encoders.base import get_appearance_encoder, list_appearance_encoders
-from .metrics.fuse import Label, compare as compare_sigs, raw_scores
+from .metrics.fuse import Label, compare as compare_sigs, compare_windows, raw_scores
 from .select import facility_location_greedy, gate as gate_fn
 from .signature import Signature, build_signatures
 from .store.numpy_store import Index
@@ -125,12 +125,33 @@ def cmd_calibrate(args) -> int:
         # is both more data and more honest: it measures the property the label
         # actually asserts ("these two recordings show the same place/work"),
         # instead of whichever single window happened to be looked up first.
+        # Resolution is by path SUFFIX, not basename. A corpus laid out by
+        # session -- .../PIP-246/<session>/000/chunks/chunk01_020-050.mp4 --
+        # repeats the same basenames under every session, so a basename lookup
+        # silently merges chunk01 of session A with chunk01 of session B and
+        # then labels cross-session pairs with whatever the label said. That is
+        # a wrong-label generator that raises no error, so an ambiguous label is
+        # refused outright rather than resolved to an arbitrary file.
         by_file = collections.defaultdict(list)
         for s_ in sigs:
-            by_file[os.path.basename(s_.path)].append(s_)
+            by_file[os.path.abspath(s_.path)].append(s_)
+
+        def _resolve(name):
+            want = name.replace(os.sep, "/").strip("/")
+            hits = [p for p in by_file
+                    if os.path.abspath(p).replace(os.sep, "/").endswith("/" + want)
+                    or os.path.abspath(p) == os.path.abspath(name)]
+            if len(hits) > 1:
+                _eprint(f"  label {name!r} is ambiguous, matches {len(hits)} indexed files:")
+                for p in sorted(hits)[:4]:
+                    _eprint(f"      {p}")
+                _eprint("      -> qualify it with enough of its path to be unique")
+                return []
+            return by_file[hits[0]] if hits else []
+
         rows = []
         for pair in spec.get("pairs", []):
-            A, B = by_file.get(pair["a"], []), by_file.get(pair["b"], [])
+            A, B = _resolve(pair["a"]), _resolve(pair["b"])
             if not A or not B:
                 _eprint(f"  label pair skipped (not indexed): {pair['a']} / {pair['b']}")
                 continue
@@ -174,13 +195,24 @@ def cmd_calibrate(args) -> int:
 
 
 # ------------------------------------------------------------------------ compare
-def _sig_for(path_or_id: str, idx: Optional[Index], cfg: Config, enc=None) -> Signature:
+def _sigs_for(path_or_id: str, idx: Optional[Index], cfg: Config, enc=None) -> List[Signature]:
+    """Every window of a file, not just the first.
+
+    Returning one signature here silently discarded most of a windowed file and
+    made file-level comparisons depend on whichever window happened to sort
+    first -- see fuse.compare_windows for what that costs.
+    """
     if idx is not None:
-        for s in idx.signatures():
-            if s.segment_id == path_or_id or os.path.abspath(s.path) == os.path.abspath(path_or_id):
-                return s
-    sigs = build_signatures(path_or_id, cfg=cfg, appearance_encoder=enc)
-    return sigs[0]
+        hits = [s for s in idx.signatures()
+                if s.segment_id == path_or_id
+                or os.path.abspath(s.path) == os.path.abspath(path_or_id)]
+        if hits:
+            return hits
+    return list(build_signatures(path_or_id, cfg=cfg, appearance_encoder=enc))
+
+
+def _sig_for(path_or_id: str, idx: Optional[Index], cfg: Config, enc=None) -> Signature:
+    return _sigs_for(path_or_id, idx, cfg, enc)[0]
 
 
 def cmd_compare(args) -> int:
@@ -189,10 +221,10 @@ def cmd_compare(args) -> int:
     if getattr(args, "config", None):
         cfg = _cfg(args)
     enc = get_appearance_encoder(cfg.appearance.encoder, **cfg.appearance.encoder_kwargs)
-    a = _sig_for(args.a, idx, cfg, enc)
-    b = _sig_for(args.b, idx, cfg, enc)
+    a = _sigs_for(args.a, idx, cfg, enc)
+    b = _sigs_for(args.b, idx, cfg, enc)
     null = idx.null() if idx else None
-    v = compare_sigs(a, b, null=null, decision=cfg.decision, hashing=cfg.hashing)
+    v = compare_windows(a, b, null=null, decision=cfg.decision, hashing=cfg.hashing)
     if args.json:
         print(json.dumps(v.as_dict(), indent=2, default=float))
     else:

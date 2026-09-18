@@ -91,6 +91,21 @@ class _HFVideoEncoder:
             self._proc = AutoImageProcessor.from_pretrained(self.model_id)
         self._model = AutoModel.from_pretrained(self.model_id, torch_dtype=dt).to(dev).eval()
 
+    def _prepare(self, batch: List[np.ndarray]):
+        """Windows -> model inputs. Override when the processor signature differs.
+
+        ``batch`` is a list of ``(clip_len, H, W, 3)`` uint8 arrays.
+        """
+        inp = self._proc([list(w) for w in batch], return_tensors="pt").to(self._device)
+        if self._model.dtype != self._torch.float32:
+            inp = {k: (v.to(self._model.dtype) if v.is_floating_point() else v)
+                   for k, v in inp.items()}
+        return inp
+
+    def _forward(self, inp):
+        """Model inputs -> (B, D) float tensor. Override per-architecture."""
+        return self._pool(self._model(**inp))
+
     def _pool(self, out):
         h = out.last_hidden_state              # (B, T*P, D)
         return h.mean(dim=1)
@@ -119,12 +134,8 @@ class _HFVideoEncoder:
         feats = []
         with torch.no_grad():
             for i in range(0, len(windows), self.batch_size):
-                batch = [list(w) for w in windows[i:i + self.batch_size]]
-                inp = self._proc(batch, return_tensors="pt").to(self._device)
-                if self._model.dtype != torch.float32:
-                    inp = {k: (v.to(self._model.dtype) if v.is_floating_point() else v)
-                           for k, v in inp.items()}
-                feats.append(self._pool(self._model(**inp)).float().cpu().numpy())
+                inp = self._prepare(windows[i:i + self.batch_size])
+                feats.append(self._forward(inp).float().cpu().numpy())
         V = np.concatenate(feats, 0).mean(0).astype(np.float32)
         return V / (np.linalg.norm(V) + 1e-8)
 
@@ -141,3 +152,64 @@ class VJepa2Encoder(_HFVideoEncoder):
 class VideoMAEEncoder(_HFVideoEncoder):
     def __init__(self, model_id: str = "MCG-NJU/videomae-base", **kw):
         super().__init__(model_id, "videomae", **kw)
+
+
+@register_task_encoder("cosmos-embed1")
+class CosmosEmbed1Encoder(_HFVideoEncoder):
+    """NVIDIA Cosmos-Embed1 -- a video/text joint embedder.
+
+    Worth having because its training mix (AgiBot, BridgeV2, DROID, RoboNet, 1X)
+    is robotics/egocentric rather than Kinetics-style action clips, so it has
+    seen manipulation footage that looks like ours. Variants: ``224p`` -> 256-d,
+    ``336p`` and ``448p`` -> 768-d.
+
+    Two caveats that decide how you read its scores:
+
+    * It is **text-aligned** (contrastive against captions). That is the same
+      caption-collapse risk docs/01 cites for rejecting CLIP on the environment
+      axis -- two different factories both captionable as "worker sorting parts"
+      can converge. It is wired in on the *task* axis only, where that failure
+      is less damaging, and it is an alternative to ``vjepa2``, not a
+      replacement for the flow descriptor's rhythm/period features.
+    * It pools **8 frames** per forward pass. At the default ``fps=2.0`` one
+      window spans 4 s of wall-clock, so a 30 s segment is many windows
+      mean-pooled -- it still cannot see a 6 s work cycle in one pass, which is
+      exactly why motion.py's autocorrelation features keep running alongside.
+    """
+
+    def __init__(self, model_id: str = "nvidia/Cosmos-Embed1-336p", **kw):
+        kw.setdefault("size", 336)
+        kw.setdefault("clip_len", 8)      # the released variants are tuned for 8
+        kw.setdefault("stride", 4)
+        kw.setdefault("fps", 2.0)         # 8 frames @ 2 fps == 4 s of context
+        kw.setdefault("dtype", "bfloat16")
+        super().__init__(model_id, "cosmos-embed1", **kw)
+
+    def _lazy(self):
+        if self._model is not None:
+            return
+        try:
+            import torch
+            from transformers import AutoModel, AutoProcessor
+        except ImportError as exc:  # pragma: no cover
+            raise ImportError(
+                f"task encoder {self.name!r} needs torch + transformers:\n"
+                f"    pip install 'novelty[gpu]'"
+            ) from exc
+        self._torch = torch
+        dev = self._device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._device = dev
+        # bfloat16 on Ampere+; CPU gets float32 because bf16 matmul there is slow.
+        self._dt = getattr(torch, self._dtype_name) if dev == "cuda" else torch.float32
+        self._proc = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
+        self._model = AutoModel.from_pretrained(
+            self.model_id, trust_remote_code=True
+        ).to(dev, dtype=self._dt).eval()
+
+    def _prepare(self, batch: List[np.ndarray]):
+        # Cosmos wants BTCHW, not the BTHWC that decode gives us.
+        arr = np.transpose(np.stack(batch), (0, 1, 4, 2, 3))
+        return self._proc(videos=arr).to(self._device, dtype=self._dt)
+
+    def _forward(self, inp):
+        return self._model.get_video_embeddings(**inp).visual_proj

@@ -20,3 +20,6 @@ data/
 *.mp4
 *.mov
 *.mkv
+
+# CSV results -- these live on S3 now (see WORK.md section 9), local is staging
+output/

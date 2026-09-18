@@ -197,3 +197,51 @@ def compare(a, b, *, null=None, decision=None, hashing=None) -> Verdict:
     return Verdict(a=a.label, b=b.label, label=label, env_score=float(env),
                    task_score=float(task), calibrated=calibrated,
                    raw=raw, duplicate=dup, notes=notes)
+
+
+def compare_windows(A, B, *, null=None, decision=None, hashing=None) -> Verdict:
+    """Compare two *files* by every cross-window pair, not one window each.
+
+    A 60 s file windowed at 30 s/15 s is four signatures. Scoring one window
+    against one window throws away fifteen sixteenths of the evidence and swings
+    the percentile by tens of points -- on this repo's own footage, a chunk pair
+    that sits at the 71st percentile aggregated reads 49th on the single pair
+    that happened to be first. That is the same failure that made file-level
+    labels read AUC 0.222 before `calibrate --labels` was taught to expand them.
+
+    Percentiles are averaged and the label re-derived from the average, so the
+    verdict describes the files. ``DUPLICATE_SOURCE`` is the exception: shared
+    footage anywhere in either file makes the pair a duplicate, so it wins
+    whenever any window pair reports it.
+    """
+    from ..config import DecisionConfig
+    decision = decision or DecisionConfig()
+    pairs = [compare(a, b, null=null, decision=decision, hashing=hashing)
+             for a in A for b in B]
+    if len(pairs) == 1:
+        return pairs[0]
+
+    env = float(np.mean([v.env_score for v in pairs]))
+    task = float(np.mean([v.task_score for v in pairs]))
+    raw = {k: float(np.mean([v.raw[k] for v in pairs])) for k in pairs[0].raw}
+    dup = max((v for v in pairs), key=lambda v: v.duplicate.get("overlap_seconds", 0.0)).duplicate
+
+    if any(v.label == Label.DUPLICATE_SOURCE for v in pairs):
+        label = Label.DUPLICATE_SOURCE
+    else:
+        same_env = env >= decision.env_percentile
+        same_task = task >= decision.task_percentile
+        label = (
+            Label.REDUNDANT if (same_env and same_task) else
+            Label.SAME_PLACE_NEW_TASK if (same_env and not same_task) else
+            Label.SAME_TASK_NEW_PLACE if (same_task and not same_env) else
+            Label.NOVEL
+        )
+
+    notes = list(dict.fromkeys(n for v in pairs for n in v.notes))
+    env_sd = float(np.std([v.env_score for v in pairs]))
+    notes.append(f"aggregated over {len(pairs)} window pairs "
+                 f"({len(A)}x{len(B)}); env percentile sd={env_sd:.1f}")
+    return Verdict(a=A[0].label, b=B[0].label, label=label, env_score=env,
+                   task_score=task, calibrated=pairs[0].calibrated,
+                   raw=raw, duplicate=dup, notes=notes)

@@ -4,7 +4,30 @@
 what was measured, what is broken, and what to do next. The `docs/` directory
 explains *how the code works*; this file explains *where the project is*.
 
-Last updated: 2026-09-17 · commit `a301d95` · repo `abirsinha-humynlabs/video-novelty`
+Last updated: 2026-09-18 · commit `c1bd9ae` + uncommitted work · repo `abirsinha-humynlabs/video-novelty`
+
+> **2026-09-18 session changed the picture substantially. Read §0 first.**
+
+---
+
+## 0. What changed on 2026-09-18
+
+Four things, in order of how much they should change your plans:
+
+1. **The environment tier is now validated against a real hard negative.**
+   AUC **0.9983**, 4.40 pooled sd, best-F1 0.982, over 630 pairs from two
+   Pipe_Factory sessions. §6's "you cannot validate this without new
+   recordings" is **resolved for the environment axis**. It is still fully open
+   for the task axis — see §6.
+2. **The GPU path ran for the first time.** P1 is done. DINOv2, V-JEPA 2,
+   VideoMAE and NVIDIA Cosmos-Embed1 all execute on an A10G. Three missing
+   dependencies and three silent bugs were found doing it (§7).
+3. **`decision.env_percentile` moved 97 → 52**, because it was measured rather
+   than guessed. This is the single most consequential config change in the
+   repo's history and it is corpus-dependent — read §5.3 before trusting it
+   anywhere else.
+4. **The environment is no longer the 2-core container described in old §9.**
+   It is a Linux box with an A10G. §9 is rewritten.
 
 ---
 
@@ -18,21 +41,22 @@ physical-AI / VLA model, and which are redundant. "Redundant" must mean
 **What exists:** a working Python package, `novelty`, that builds three-tier
 signatures per video span, calibrates similarity against the user's own corpus,
 and selects a maximally-diverse subset by submodular coverage maximisation.
-44 tests pass. Pushed to GitHub. Runs on CPU with zero learned weights; has a
-GPU path wired but **never executed** (no torch in the build environment).
+44 tests pass. Runs on CPU with zero learned weights; the GPU path is now
+**executed and verified** on an A10G.
 
 **Where it stands:**
 
 | tier | what it answers | status |
 |---|---|---|
 | 0 — perceptual hash | did these share literal footage? | **works**, tested |
-| 1 — appearance | same physical place? | **works**, AUC 0.997 on real data |
-| 2 — motion/task | same work happening? | **barely above chance**, AUC 0.630 |
+| 1 — appearance | same physical place? | **validated**, AUC 0.998 vs a real hard negative |
+| 2 — motion/task | same work happening? | **still unvalidated** — every number is confounded |
 
-**The single most important fact for you:** the task tier is unvalidated and
-probably not good enough, and *you cannot fix it by writing code*, because the
-user has no data that can distinguish a working task-detector from a broken one.
-See §6.
+**The single most important fact for you:** the task tier is unvalidated, and
+*you still cannot fix it by writing code*. Every labelled pair that exists —
+old and new — varies environment and task **together**, so a detector that
+ignores motion entirely scores ~0.99. See §6. The environment tier no longer
+has this problem; the task tier is unchanged since day one.
 
 ---
 
@@ -54,8 +78,54 @@ why. Do not silently revert to it.
 
 ## 3. The data
 
-All on the user's Mac (`abirs-macbook-pro-2-local`), in `~/Downloads`. The
-session had folder access granted to `~/Downloads` only.
+### 3.0 Current corpus (2026-09-18) — this is what to use
+
+Pulled from S3 presigned URLs the user supplies in chat, laid out mirroring the
+bucket path. **Never commit a presigned URL — they carry AWS credentials.**
+
+```
+data/normalized/bitrobot/Pipe_Factory/2026-08-27/
+  PIP-246/20260827_123109_session36/000/left_rectified.mp4   598.8s 1080p30 HEVC
+                                        chunks/              18 x 30s (20s->560s)
+  PIP-250/20210105_153825_session9/000/left_rectified.mp4    598.8s 1080p30 HEVC
+                                        chunks/              18 x 30s (20s->560s)
+```
+
+| | PIP-246 / session36 | PIP-250 / session9 |
+|---|---|---|
+| product | **grey** PVC fittings | **white** PVC fittings/tees |
+| ground | tiled factory floor, woven sacks | dark tarp + white sheeting |
+| worker | brown trousers, red bracelet | black trousers, yellow watch |
+| scene | open workshop, co-workers visible | enclosed, dim |
+
+**These two sessions are the hard negative this project was blocked on.** Same
+factory domain, same rig, same egocentric hands-in-frame PVC work — differing in
+worker, product colour, lighting and ground surface. Session membership is
+therefore free ground truth for the environment axis with no hand labelling.
+That is what produced the AUC 0.998 in §5.
+
+Three practical notes that cost time to rediscover:
+
+* **Chunks are stream-copied (`-c copy`), not re-encoded.** Source keyframes sit
+  exactly every 1.0 s, so 30 s cuts are frame-exact and lossless, and cutting
+  36 chunks takes seconds instead of ~25 min of libx264. The cost is that the
+  chunks stay HEVC, which decodes slower than H.264 — indexing runs ~22 s per
+  30 s chunk rather than ~15 s. Worth it.
+* **`left_rectified.mp4` sits *inside* `data/`, next to `chunks/`.** `novelty
+  index <dir>` walks recursively and will happily index the 10-minute source
+  alongside its own chunks, duplicating everything. **Always point `index` at
+  the `chunks/` directories explicitly.**
+* **Check uploaded files actually decode.** The first upload of session36 was
+  truncated at 58% (261 MB of 450 MB). `ffprobe` still reported the full 598.8 s
+  from metadata; only `ffmpeg -f null -` revealed it. Chunks past 347 s came out
+  empty. Verify with a full decode pass, not a duration probe.
+
+### 3.1 Older corpus (2026-09-17, on the user's Mac)
+
+Historical — kept because §5.1 and §7 refer to it. All on the user's Mac
+(`abirs-macbook-pro-2-local`), in `~/Downloads`. That session had folder access
+granted to `~/Downloads` only. **The previous run was done on a local Apple M3;
+the project has since migrated to the Linux GPU box (§9).**
 
 ### Source recordings
 
@@ -174,9 +244,87 @@ set `static_mask: false` for fixed-camera footage.**
 
 ---
 
-## 5. Measured results (real footage, reproducible)
+## 5. Measured results
 
-Setup: the four clips above, `--window 30 --hop 15` → 16 signatures.
+### 5.0 Current headline (2026-09-18, GPU, two sessions)
+
+Setup: 36 chunks (18 per session) × 30 s, `--window 30 --hop 30` → 36
+signatures, one per chunk. `configs/gpu.yaml`: **DINOv2** appearance +
+**V-JEPA 2** clip encoder. Null fitted over 630 pairs.
+
+Positives = pairs **within** one session (same environment).
+Negatives = pairs **across** sessions (different environment).
+No hand labelling — session membership is the label.
+
+```
+environment: AUC=0.9983  best-F1=0.982 @ raw>=+0.2690  separation=4.40 sigma
+             within-session +0.5010 ± 0.111   cross-session +0.0754 ± 0.080
+task       : AUC=0.9907  best-F1=0.954 @ raw>=+0.0922  separation=3.57 sigma
+             within-session +0.3469 ± 0.119   cross-session -0.0376 ± 0.095
+```
+
+**All 36 chunks have their nearest neighbour inside their own session. Zero
+cross-session confusions.**
+
+> **[Certain] Do not quote the task AUC as validation.** Session membership
+> determines `same_env` and `same_task` identically here, so the task axis can
+> score 0.99 purely by leaking environment. It is the §6 confound reproduced in
+> new data, not progress. See §6.
+
+> Weaker version of the same caveat applies to the environment number:
+> within-session pairs also share worker, lighting and product colour, so
+> "environment" here means *session identity*, not *place* in isolation. For the
+> practical question ("is this more of what I already have?") that is the right
+> quantity. For a claim about place recognition specifically, it is not isolated.
+
+### 5.1 Threshold: why `env_percentile` moved 97 → 52
+
+The best-F1 operating point above sits at the **52nd percentile** of the corpus
+null. The repo shipped 97.
+
+A percentile threshold asks *"is this pair in the top (100−p)% of my corpus"*.
+It only means "same environment" if same-environment pairs are about that rare.
+This corpus is **49% same-environment pairs**, so 97 can only ever fire on
+near-duplicates — which is exactly why two adjacent chunks of one continuous
+recording kept returning `NOVEL` and looked like a broken detector.
+
+**This value is corpus-dependent and will be wrong for your next corpus.** Add
+twenty sessions, the same-environment base rate collapses, and the correct
+percentile rises. `calibrate --labels` prints the best-F1 percentile; re-fit it
+rather than inheriting 52. The number is now in `configs/*.yaml` and
+`config.DecisionConfig`, with that reasoning in a comment at each site.
+
+`task_percentile` was deliberately **left at 95**, unmeasured. Its best-F1 point
+(48.5) comes from confounded labels, so shipping it would be laundering a
+guess into a measurement. 95 makes `REDUNDANT` hard to reach, which is the safe
+direction to be wrong in. Consequence you will see: two adjacent chunks of
+identical repetitive work currently label `SAME_PLACE_NEW_TASK`, not
+`REDUNDANT`. That is the task tier being untrusted, working as intended.
+
+### 5.2 Throughput measured on the A10G
+
+| step | cost |
+|---|---|
+| index, 30 s HEVC chunk, DINOv2 + V-JEPA2 + flow + pHash | **~22 s** |
+| index, 60 s H.264 chunk → 4 windows | ~62 s |
+| 36-chunk corpus, end to end | ~13 min |
+| Cosmos-Embed1 first call (incl. 2.4 GB download) | ~42 s |
+
+Still three separate ffmpeg decode passes per signature (P4 below).
+
+### 5.3 Historical: single-session run (2026-09-18, earlier)
+
+Before session9 existed, 10 chunks of session36 alone were indexed. Useful only
+as a record of what a single-environment corpus looks like: the environment axis
+showed a clean monotone decay with time separation (env_raw +0.609 at 0–30 s
+apart → +0.271 at 120–240 s, correlation −0.683; adjacent chunks 73.9th
+percentile vs 44.3rd for ≥5 min apart, ~90% correct ordering) — the axis
+demonstrably worked, but **no threshold was validatable**, because a corpus with
+one environment contains no negative. That is the trap; do not repeat it.
+
+### 5.4 Historical: 2026-09-17 CPU run (`gist`, four clips)
+
+Setup: the four clips in §3.1, `--window 30 --hop 15` → 16 signatures.
 Appearance encoder: **`gist`, the dependency-free one. No learned weights.**
 
 ### Raw fused scores, default weights
@@ -223,16 +371,30 @@ exactly zero. 44% of that footage carries no information the rest doesn't.
 
 ## 6. The blocker. Read this twice.
 
-**[Certain] There is currently no way to tell whether the task tier works,
-because no pair in the dataset differs on task while holding environment fixed.**
+**Environment axis: RESOLVED 2026-09-18.** PIP-250/session9 supplied the hard
+negative. AUC 0.998 over 630 pairs, ground truth from session membership. No
+further recordings needed for this axis.
 
-The eval set covers two of four quadrants:
+**Task axis: UNCHANGED. Still blocked. Still the most important thing.**
+
+**[Certain] There is still no way to tell whether the task tier works, because
+no pair in the dataset differs on task while holding environment fixed.** Adding
+session9 did not help: it differs on environment *and* task simultaneously, so
+it filled in the same diagonal the old eval set already had.
+
+The eval set still covers two of four quadrants:
 
 ```
                  same_task    diff_task
-  same_env    |  YES (3)    |  MISSING   <-- the one that matters
-  diff_env    |  MISSING    |  YES (3)
+  same_env    |  YES        |  MISSING   <-- the one that matters
+  diff_env    |  MISSING    |  YES
 ```
+
+The task AUC went 0.630 → 0.991 between the two corpora. **That is not an
+improvement in the task tier.** It is the environment signal getting stronger
+(DINOv2 instead of gist) and leaking through a confounded label set. A detector
+wired to ignore motion entirely would post a similar number. Treat 0.991 as a
+measurement of the confound, not of the model.
 
 A model that ignores motion entirely would score well on the current labels.
 No amount of feature engineering, backbone swapping or weight tuning can be
@@ -259,8 +421,43 @@ verified correct**; what is missing is real data in the missing quadrant.
 
 ## 7. Bugs found and fixed. Do not reintroduce these.
 
-All four produced confident, plausible, entirely meaningless output. None raised
-an error. They are documented in code comments at the fix sites.
+All of them produced confident, plausible, entirely meaningless output. None
+raised an error. They are documented in code comments at the fix sites.
+
+### Found 2026-09-18
+
+**7. `compare` judged two files on ONE window pair — `cli._sig_for`.**
+`_sig_for` returned the *first* signature matching a path and silently dropped
+the rest, so comparing two 60 s files windowed at 30 s/15 s used 1 of 16
+available window pairs — whichever sorted first. On real footage that read the
+61st percentile as the 49th, a 21-point swing, easily enough to flip a verdict.
+This is **bug 5 all over again** in a different function: bug 5 was fixed for
+`calibrate --labels` and nobody checked `compare`.
+Fix: `metrics.fuse.compare_windows()` scores every cross-window pair, averages
+the percentiles, re-derives the label, and reports the spread as a note
+(`env percentile sd=20.7` on that pair — that is how much the window lottery was
+worth). `DUPLICATE_SOURCE` wins if any window pair fires it.
+→ *Any file-level claim must aggregate over windows. Check every place that
+resolves a path to a signature.*
+
+**8. Labels resolved by basename, so sessions collided — `cli.cmd_calibrate`.**
+The label lookup keyed on `os.path.basename`. The corpus layout repeats chunk
+names under every session (`.../PIP-246/.../chunks/chunk01_020-050.mp4` and
+`.../PIP-250/.../chunks/chunk01_020-050.mp4`), so both collapsed into one
+bucket and a `same_env: true` label silently expanded to include cross-session
+pairs — **a wrong-label generator that raises nothing**. Fix: resolve by path
+suffix, and refuse an ambiguous label loudly instead of picking one.
+→ *Caught only because the directory layout changed. It was latent before.*
+
+**9. The `gpu` extra was missing three hard dependencies — `pyproject.toml`.**
+None are pulled in by `torch`/`transformers`: **Pillow** (HF
+`AutoImageProcessor` requires it), **torchvision** (`AutoVideoProcessor`, i.e.
+V-JEPA 2, requires it), **einops** (Cosmos-Embed1's `trust_remote_code`
+modeling file imports it). Each surfaced only as an ImportError at first model
+load, which is why "the GPU path is wired" was never the same claim as "the GPU
+path runs".
+
+### Found 2026-09-17
 
 **1. Block-scale domination — `encoders/motion.py`, `SCALAR_W`.**
 The per-frame descriptor concatenated a 128-bin L1-normalised histogram (L2 norm
@@ -309,35 +506,52 @@ camera. Worth knowing if you ever run this on rendered or looped content.
 
 ## 8. What to do next, ranked
 
-### P0 — unblock validation (no code)
-Get the `SAME_PLACE_NEW_TASK` recordings described in §6 and add them to
-`eval/pairs.yaml`. Everything below is unmeasurable until this exists.
+### P0 — unblock the TASK axis (no code, still)
+Unchanged and still first. Get the `SAME_PLACE_NEW_TASK` recordings described in
+§6 and label them. Two different jobs **in the same station, same worker, same
+lighting**. Everything about the task tier is unmeasurable until this exists,
+and the new session9 data did *not* supply it.
 
-### P1 — run the GPU path for the first time
-`configs/gpu.yaml` is written and wired but **has never executed** — the build
-container has no torch. Expect to debug:
-- `encoders/appearance._TorchVisionEncoder` — the processor/dtype handling for
-  DINOv2 is written from the API, not verified.
-- `encoders/video._HFVideoEncoder` — `AutoVideoProcessor` fallback to
-  `AutoImageProcessor`, and the `_pool` over `last_hidden_state`, are both
-  unverified. V-JEPA 2's output shape in particular should be checked, not
-  assumed.
-- The model IDs (`facebook/dinov2-base`, `facebook/vjepa2-vitl-fpc64-256`,
-  `MCG-NJU/videomae-base`) should be confirmed against the current hub.
+### P1 — run the GPU path — **DONE 2026-09-18**
+All four backbones execute on the A10G, fp16/bf16, L2-normed, no NaNs:
 
-Then re-measure §5 with DINOv2 + V-JEPA 2 and compare. **Report the delta
-honestly; do not assume the learned backbone wins.**
+| encoder | tier | dim | notes |
+|---|---|---|---|
+| `dinov2` | 1 | 768 | verified; the §5.0 numbers use it |
+| `vjepa2` | 2 | 1024 | needed torchvision (bug 9) |
+| `videomae` | 2 | 768 | verified |
+| `cosmos-embed1` | 2 | 768 | added this session; needed einops (bug 9) |
+
+Model IDs confirmed against the live hub. `_TorchVisionEncoder`'s CLS pooling
+and `_HFVideoEncoder`'s processor fallback both work as written.
+
+**Still not done: the A/B.** `configs/gpu-cosmos.yaml` exists and Cosmos-Embed1
+is verified in isolation, but no head-to-head against V-JEPA 2 on the task axis
+has been run. Note that such an A/B is **currently unreadable anyway** — with
+confounded labels (§6) both will score ~0.99 by leaking environment. Do P0
+first, or the comparison measures nothing.
+
+### P1.5 — the one V-JEPA 2 finding worth acting on
+`task_cos` on raw V-JEPA 2 embeddings is **0.9921 vs 0.9927** across every pair
+in the corpus — a 0.0006 spread, within- and cross-session alike. That is the
+transformer anisotropy / cone effect, and it is the same *class* of problem as
+bug 1. Whitening rescues it into a usable range, which is the entire reason the
+repo refuses to print uncalibrated scores. If you add any new clip encoder,
+check its raw spread before trusting it.
 
 ### P2 — widen windows and retest the rhythm features
 `--window 60 --hop 30`. The 4–6 s cycles in this footage need ≥ ~35 s of window.
 If `rhythm_cos` and `period_agree` still fit to 0.00, they can be dropped.
 
 ### P3 — index at real scale
-Everything so far used 16 signatures. The null model and whitener are fitted on
-the corpus and are noise below ~50 signatures (the CLI warns). Index the full
-`left_rectified*.mp4` set windowed — roughly 40 min of video → ~150 signatures →
-a null distribution that means something. Budget ~28 s per 60 s of video per
-core (see §9).
+The largest run so far is **36 signatures** (two sessions × 18 chunks). The null
+model and whitener are fitted on the corpus and are noise below ~50 signatures —
+the CLI warns on every run so far, including the one behind the AUC 0.998. Those
+numbers are strong enough that the warning is unlikely to be hiding a reversal,
+but **they are still fitted on 36 points and should be re-run at scale.**
+More sessions also fix the other half of §5.1: the right `env_percentile` is a
+function of how redundant the corpus is, and two sessions is not a corpus.
+Budget ~22 s per 30 s HEVC chunk on the A10G (§5.2).
 
 ### P4 — throughput
 Currently **three separate ffmpeg decode passes per signature** (appearance,
@@ -356,6 +570,27 @@ mean", which is the design this repo exists to argue against. For selection at
 that scale, build a sparse k-NN graph (k≈50) and run lazy greedy on it.
 
 ### Explicitly NOT done, and why
+- **Nothing adopted from NVIDIA Cosmos Curator**, after researching it on
+  request. It is a Ray/Cosmos-Xenna distributed pipeline needing NVCF or Slurm,
+  with per-stage GPU fractions tuned for 48 GB cards — wildly disproportionate
+  for a 36-signature corpus on one A10G. More importantly its semantic dedup is
+  *k*-means + within-cluster cosine + a magic `eps=0.01` threshold, which is
+  exactly the cluster-and-threshold pattern `docs/01` measured and rejected.
+  Adopting it would be a regression dressed as an upgrade. Its *orchestration*
+  may matter at P3–P5 scale; its similarity logic never will.
+  **Cosmos-Embed1 (the model) was adopted — that part is worth having.** Caveat
+  recorded in its docstring: it is contrastively text-aligned, so it carries the
+  caption-collapse risk `docs/01` cites against CLIP. It is wired to the task
+  axis only, never appearance.
+- **DINOv3 not added.** Available and commercially licensed, but **gated** —
+  needs the user's own HF account to accept terms. Shipping a registry entry
+  that cannot be executed is worse than not shipping it. One caution for
+  whoever does add it: DINOv3 introduces register tokens. CLS stays at index 0
+  so `_pool`'s `h[:, 0]` should still be right, but **verify that against real
+  weights rather than assuming it.**
+- **V-JEPA 2.1 deferred.** Not officially on HF (torch.hub only; transformers
+  issue #45496 open). Only a community conversion exists. Revisit when official
+  checkpoints land.
 - **No vector database.** At 1e4 signatures a dense float32 matmul is
   milliseconds with zero operational surface. Adding Qdrant now would be
   infrastructure without a problem. Revisit at P5.
@@ -373,56 +608,132 @@ that scale, build a sparse k-NN graph (k≈50) and run lazy greedy on it.
 
 ## 9. Environment notes (these cost time to rediscover)
 
-### Two machines
-- **Cloud container** (`Bash` tool): Python 3.11, numpy 2.4, scipy, OpenCV 4.13,
-  scikit-learn, pandas, PyYAML, ffmpeg. **No torch. 2 cores, 7 GB RAM.**
-- **User's Mac** (`mcp__remote-devices__device_bash`): a Linux VM with
-  `~/Downloads` mounted at `$HOME/mnt/Downloads`. Python 3.10, ffmpeg. Files in
-  the mounted folder **cannot be deleted** without an explicit permission grant
-  — `rm` fails with "Operation not permitted", and `git` emits
-  `unable to unlink ... tmp_obj_*` warnings as a result (harmless, but do git
-  work in `$HOME` scratch and copy across if it bothers you).
+### The machine (rewritten 2026-09-18 — the old description is obsolete)
 
-### GitHub push must happen from the Mac
-**[Certain]** The cloud container's egress proxy intercepts `api.github.com` and
-rejects bring-your-own tokens with
-`{"message":"No linked GitHub account. Connect your GitHub account and retry."}`.
-The same token works fine from `device_bash`. So: build in the container, tar it,
-`device_commit_files` it across, `git push` from `device_bash`.
+Work has **migrated off the user's Apple M3 and off the 2-core cloud container**
+onto a Linux GPU box. Anything in an older note claiming "no torch" or "2 cores"
+is stale.
 
-GitHub account: `abirsinha-humynlabs`. The user pasted a PAT in chat; **he was
-told to rotate it and you should assume it is dead.** Ask for a fresh one. Never
-write a token into a file, a git remote, or a commit.
+```
+Amazon Linux 2023 · 4 cores · 15 GB RAM
+NVIDIA A10G, 23 GB VRAM, compute 8.6 (Ampere -> native bf16)
+driver 595.91.07 · CUDA 13.2 toolkit at /usr/local/cuda-13.2 (nvcc present)
+torch 2.8.0+cu128 (cu12 wheels run fine on the 13.2 driver)
+```
+
+Setup that is **not** reproducible from `make install` alone:
+
+* **Use `uv`.** `uv venv .venv && uv pip install -e ".[gpu,fit,dev]"`. Installs
+  in seconds where pip takes minutes.
+* **ffmpeg is not in the AL2023 dnf repos.** `dnf install ffmpeg` fails with
+  "no match". Fetch the static build
+  (`johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz`) and
+  drop `ffmpeg`/`ffprobe` into `~/.local/bin`, which is already on PATH.
+  Without them **22 of the 44 tests error out** — they need real video.
+* **No NVENC** in that static build, so chunk re-encoding is CPU-bound. Prefer
+  `-c copy` (see §3.0).
+* Hugging Face is reachable; model downloads work directly.
+
+### Data arrives as S3 presigned URLs
+The user pastes them in chat. They carry AWS credentials in the query string and
+expire (~7 days). **Use them inline in `curl` only — never write one to a file,
+a git remote, or a commit.**
+
+### S3 is where chunks and results live (local disk is staging only)
+
+The box runs at ~84% disk with 1.6 GB of video per two sessions, so **nothing
+large stays local**. The instance profile (`SSM-Role`) grants S3 access with no
+keys to manage — `aws s3 ...` just works.
+
+```
+s3://stage-humyn-egocentric-stereo-data/labelling_results/
+    novelty_data/<mirrored source path>/chunks/*.mp4   30 s chunks
+    novelty_result/<mirrored source path>/*.csv        chunks.csv, pairs.csv
+    novelty_result/summary.csv
+```
+
+> ## [Certain] WRITE ONLY TO THOSE TWO PREFIXES.
+> `labelling_results/` holds ~48 sibling prefixes belonging to other pipelines
+> (`hand_pose_*`, `6dof_head_pose_*`, `depth_*`, `delivery/`, `gt/`, …). A
+> mistyped `--out` into one of those is not a recoverable mistake. The rule is
+> enforced in code — `scripts/report_csv.py` has an `S3_WRITE_ALLOWLIST` and
+> refuses anything else — because a runbook cannot stop a typo.
+> Never pass `--delete` to `aws s3 sync` against a shared prefix.
+
+### Video never stays on local disk. Results do.
+
+The rule, set 2026-09-18: **`data/` is not kept locally.** Video is downloaded,
+chunked, uploaded and deleted inside one script. `output/` is the exception —
+CSVs are ~220 KB and are what people actually read, so they live **both**
+locally and on S3.
+
+```bash
+# ingest one recording: download -> verify -> chunk -> upload -> index -> delete
+python scripts/ingest_session.py --url "<presigned url>" --index .novelty-2sess
+
+# results: local output/ AND the S3 mirror, in one command
+python scripts/report_csv.py --index .novelty-2sess
+```
+
+`ingest_session.py` derives the whole mirrored directory layout from the URL's
+own key, so nobody types a path. It uses a temp dir that is removed in a
+`finally`, deletes the 430 MB source as soon as chunking finishes, and verified
+at **zero net disk growth** on a full run. `--keep-local` exists for debugging
+decode behaviour and defeats the point of the script.
+
+**Why this is safe:** nothing downstream needs the video. `compare`, `select`
+and `report_csv` all read *signatures* from the index (~210 KB each; a 36-chunk
+corpus is ~8 MB). Verified after deleting `data/` entirely — all three still
+run. Only indexing a **new** file needs bytes on disk, which is what
+`ingest_session.py` is for.
+
+The 10-minute `left_rectified.mp4` sources are **not** uploaded to
+`novelty_data` — they already exist in `prod-egc-stereo-v2-data`, and
+duplicating 430 MB per session buys nothing. `novelty_data` holds chunks only.
+
+**Aside worth following up:** those sibling prefixes show the org already
+produces hand-pose, 6-DoF head-pose and SLAM outputs. A tier-3 "physical
+variation" axis built on those is far more feasible than it looks from inside
+this repo, which ingests RGB only. Revisit after §6's task blocker is cleared.
+
+### GitHub
+GitHub account: `abirsinha-humynlabs`. The user pasted a PAT in chat once; **he
+was told to rotate it and you should assume it is dead.** Ask for a fresh one.
+Never write a token into a file, a git remote, or a commit.
+
+*(The old note here said pushes must happen from the Mac because the cloud
+container's egress proxy intercepted `api.github.com`. That applied to the
+retired container — re-test from the GPU box before assuming it still holds.)*
 
 ### Timing
-Full signature (appearance + flow + pHash) on 60 s of 1080p30, 2 cores: **~28 s**,
-i.e. ~2× realtime. A 30 s window costs ~13 s. The three decode passes dominate.
+See §5.2 for measured A10G numbers. Historical, 2 cores, no GPU: a full
+signature on 60 s of 1080p30 took **~28 s**, ~2× realtime.
 
-### Scratch state (ephemeral — will not survive)
-- Container index used for all §5 numbers: `/tmp/nvx` (gone).
-- Generated report: `/tmp/nvx-report.html`, copied to the user's chat.
-- Device copy of the repo: `~/Downloads/video-novelty` (origin already set,
-  no token in `.git/config`), plus `$HOME/vn` in the device VM scratch.
-- Tarball: `~/Downloads/video-novelty.tar.gz`.
+### State on the GPU box
+- `.novelty-2sess/` — the 36-signature two-session index behind every §5.0
+  number. Calibrated. **This is the one to use.**
+- `.novelty-gpu/` — earlier single-session index (§5.3). Superseded.
+- `output/` — per-session CSVs, mirroring the S3 tree (see §10).
+- `.venv/` — uv-managed, `[gpu,fit,dev]` + pillow/torchvision/einops.
+- Both indices and `data/` are gitignored (`data/`, `*.mp4`, `.novelty*`).
 
 ---
 
 ## 10. Commands
 
 ```bash
-# setup
-make install          # CPU: numpy scipy opencv pyyaml sklearn. No weights, no network.
-make install-gpu      # + torch, transformers
-make test             # 44 tests, synthetic video fixtures, ~25 s
+# setup on the GPU box (see §9 -- ffmpeg is NOT in the AL2023 repos)
+uv venv .venv && uv pip install -e ".[gpu,fit,dev]" --python .venv/bin/python
+.venv/bin/python -m pytest -q      # 44 tests, ~16 s, needs ffmpeg on PATH
 
-# reproduce the §5 numbers
-SRC=~/Downloads/'left_rectified(5).mp4' \
-SRC2=~/Downloads/front_left_rectified.mp4 \
-  bash scripts/prepare_eval_clips.sh
-novelty index data/clips --index .novelty --window 30 --hop 15
-novelty calibrate --index .novelty --labels eval/pairs.yaml
-novelty select --index .novelty
-novelty report --index .novelty --out novelty-report.html
+# reproduce the §5.0 numbers (two sessions, 30 s chunks)
+# one command per recording -- download, verify, chunk, upload, index, delete
+python scripts/ingest_session.py --url "<session36 presigned url>" --index .novelty-2sess
+python scripts/ingest_session.py --url "<session9  presigned url>" --index .novelty-2sess
+novelty calibrate --index .novelty-2sess
+python scripts/report_csv.py --index .novelty-2sess     # local output/ + S3 mirror
+novelty select --index .novelty-2sess
+novelty report --index .novelty-2sess --out novelty-report.html
 
 # the rest
 novelty compare a.mp4 b.mp4 --index .novelty   # explain one pair
@@ -433,6 +744,25 @@ novelty encoders                               # list backbones
 
 **Always calibrate before reading a score.** Uncalibrated, `compare` prints raw
 numbers and says so in a note; those numbers are not comparable to anything.
+
+**An index stores its own config.** `compare` prefers the index's stored config
+over `configs/*.yaml`, so changing a threshold on disk does *not* change the
+verdicts of an existing index. Either pass `--config` explicitly or edit
+`<index>/config.yaml`. This wastes ten minutes if you do not know it.
+
+### Output CSVs (`scripts/report_csv.py`)
+
+Writes into `output/`, mirroring the source tree:
+
+```
+output/normalized/bitrobot/Pipe_Factory/2026-08-27/<PIP>/<session>/000/
+    chunks.csv   one row per chunk: span, detected period + strength, nearest
+                 neighbour and which session it is in, env/task percentiles,
+                 verdict, within- vs cross-session similarity, coverage
+                 selection rank and marginal gain
+    pairs.csv    every comparison behind those numbers
+output/summary.csv   per-session within/cross means
+```
 
 ---
 
@@ -448,7 +778,15 @@ numbers and says so in a note; those numbers are not comparable to anything.
 | `docs/06-running-on-gpu.md` | DINOv2, V-JEPA 2, throughput, scaling the store |
 | `docs/07-tuning.md` | every knob, every failure mode and how to recognise it |
 | `eval/pairs.yaml` | the label file — its header documents its own inadequacy |
+| `scripts/report_csv.py` | the `output/` CSVs: what each column means |
+| `configs/gpu-cosmos.yaml` | why Cosmos-Embed1 is task-axis-only, and the fps/clip_len reasoning |
+
+**Docs not yet updated for 2026-09-18.** `docs/04-calibration.md` and
+`docs/07-tuning.md` still describe `env_percentile: 97` as the operating point,
+and `docs/06-running-on-gpu.md` still speaks of the GPU path as untried. The
+code and this file are correct; those three docs lag. Fix them when you touch
+that area.
 
 Code comments at every non-obvious decision explain the *why*, especially at the
-four bug sites in §7. If you change something there, update the comment; the
+nine bug sites in §7. If you change something there, update the comment; the
 next agent after you will rely on it the way you are relying on this file.
