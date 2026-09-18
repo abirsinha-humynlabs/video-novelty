@@ -158,6 +158,13 @@ plumbing is right, and what's missing is real data in the missing quadrant.
 
 ---
 
+## Picking this up
+
+**[WORK.md](WORK.md) is the handoff document** — project state, what was
+measured, the bugs that were found and why they mattered, what is blocked and on
+what, and the ranked next steps. Read it before the docs below; `docs/` explains
+how the code works, `WORK.md` explains where the project is.
+
 ## Docs
 
 | | |
