@@ -93,6 +93,19 @@ def load_tracks(keypoints_npz: str, head_npz: Optional[str] = None) -> HandTrack
     kp, fi = d["kp3d_cam"], d["frame_idx"]
     hand, kept, wearer = d["hand"], d["kept"], d["is_wearer"]
     fps = float(d["fps"])
+
+    # `step` is the detector's frame stride: fps is the SOURCE rate but
+    # detections exist only every `step`-th frame. Ignoring it is silently
+    # fatal on subsampled runs -- frame_idx still spans the full video, so a
+    # 3 fps run (step=10) looks like 90% missing data, coverage reads 4% when
+    # the true detection rate on sampled frames is 83%, and every 0.33 s
+    # inter-detection interval trips the long-gap guard and blanks the whole
+    # signal. Work on the sampled grid instead, where the effective rate is
+    # fps/step and one index is one real sample.
+    step = int(d["step"]) if "step" in d.files else 1
+    step = max(step, 1)
+    fps = fps / step
+    fi = fi // step
     n = int(fi.max()) + 1
 
     # bystander hands (hand==2) and non-wearer tracks are dropped here rather
@@ -110,7 +123,9 @@ def load_tracks(keypoints_npz: str, head_npz: Optional[str] = None) -> HandTrack
     if head_npz:
         h = np.load(head_npz)
         T = np.full((n, 4, 4), np.nan)
-        hf = h["frame_idx"]
+        # head frame_idx is in SOURCE frames, so it needs the same stride
+        # mapping as the keypoints or the two would be misaligned by `step`.
+        hf = h["frame_idx"] // step
         ok = hf < n
         T[hf[ok]] = h["T"][ok]
         for k in (LEFT, RIGHT):
@@ -139,6 +154,14 @@ def _to_world(pose: np.ndarray, T: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- signal
+#: Gap tolerance is expressed in SAMPLES as well as seconds, and the looser of
+#: the two wins. A fixed 0.3 s is under one sample at 3 fps, so a single missed
+#: detection would blank the run -- which silently zeroed every subsampled
+#: episode. Tolerating a few missing samples is what the rule was always meant
+#: to express.
+MAX_GAP_SAMPLES = 3
+
+
 def _fill(x: np.ndarray, fps: float = 30.0, max_gap_s: float = 0.3
           ) -> Optional[np.ndarray]:
     """Interpolate only across SHORT gaps; leave long ones as NaN.
@@ -156,7 +179,7 @@ def _fill(x: np.ndarray, fps: float = 30.0, max_gap_s: float = 0.3
         return None
     out = np.interp(np.arange(n), np.arange(n)[m], x[m])
     # re-blank anything that sat inside a gap longer than max_gap_s
-    max_gap = max(int(max_gap_s * fps), 1)
+    max_gap = max(int(max_gap_s * fps), MAX_GAP_SAMPLES)
     edges = np.diff(np.concatenate([[1], m.astype(int), [1]]))
     starts = np.nonzero(edges == -1)[0]
     ends = np.nonzero(edges == 1)[0]

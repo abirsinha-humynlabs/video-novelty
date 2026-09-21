@@ -58,6 +58,27 @@ PROD_NPZ_PREFIXES = (
 )
 N_CYCLES = 6
 
+#: Only full-rate tracks are accepted. Set to 1 deliberately: the hand detector
+#: must run at the source frame rate (step=1, 30 fps) for cycle cutting to mean
+#: anything.
+#:
+#: Measured by decimating episodes that work at step=1 and re-running the
+#: identical analysis, so everything lost is lost purely to temporal resolution:
+#:
+#:   cycle    step=1      step=2      step=3      step=5     step=10
+#:   1.30 s   2 ch  +-1%  3 ch  +-5%  3 ch  +-8%  3 ch +-12%  1 ch +-25%
+#:   0.73 s   9 ch  +-5%  9 ch  +-9%  7 ch +-14%  5 ch +-25%  0 chunks
+#:   0.57 s   2 ch  +-6%  1 ch +-14%  0 chunks    0 chunks    0 chunks
+#:
+#: (+-% = boundary precision as a share of one cycle). Roughly 7 samples per
+#: cycle are needed. step=10 produced 0 chunks across 24 real episodes. Phase
+#: alignment is the entire purpose of cutting on cycles, so even where coarser
+#: strides still yield chunks they give back most of the benefit.
+#:
+#: Episodes coarser than this are recorded with a reason rather than silently
+#: yielding nothing, so "no chunks" is never confused with "no cadence".
+MAX_STEP = 1
+
 #: Profile used ONLY for reads from the prod bucket. Writes deliberately keep
 #: using the default (instance-role) credentials: an SSO identity is typically
 #: far broader than this box needs, and no write path should run through it.
@@ -124,6 +145,16 @@ def phase_a(args):
         hd = kp.replace("_hand21_keypoints.npz", "_head.npz")
         rec = {"name": name, "keypoints": kp, "head": hd if os.path.exists(hd) else None}
         try:
+            step = int(np.load(kp, allow_pickle=True)["step"])
+        except Exception:                                          # noqa: BLE001
+            step = 1
+        rec["step"] = step
+        if step > MAX_STEP:
+            rec.update(segments=[], skipped=f"step={step} ({30/step:.0f} fps) "
+                       f"coarser than MAX_STEP={MAX_STEP}; re-run at step<=3")
+            index[name] = rec
+            continue
+        try:
             tr = C.load_tracks(kp, rec["head"])
             hand = C.RIGHT if tr.coverage[C.RIGHT] >= tr.coverage[C.LEFT] else C.LEFT
             P, _strength = C.estimate_period(tr, hand=hand)
@@ -147,6 +178,10 @@ def phase_a(args):
     dt = time.time() - t0
     with open(os.path.join(args.out, "segments.json"), "w") as fh:
         json.dump(index, fh, indent=1)
+    skipped = [r for r in index.values() if r.get("skipped")]
+    if skipped:
+        print(f"  SKIPPED {len(skipped)} episodes for coarse frame stride "
+              f"(step>{MAX_STEP}); they cannot produce cycle chunks")
     withseg = [r for r in index.values() if r.get("segments")]
     nseg = sum(len(r["segments"]) for r in withseg)
     print(f"  {dt:.1f}s total, {dt/max(len(kps),1)*1000:.0f} ms/episode")
