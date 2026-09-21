@@ -176,6 +176,7 @@ how the code works, `WORK.md` explains where the project is.
 | [05 — Coverage selection](docs/05-coverage-selection.md) | submodularity, the greedy guarantee, the knee |
 | [06 — Running on GPU](docs/06-running-on-gpu.md) | DINOv2, V-JEPA 2, throughput, scaling the store |
 | [07 — Tuning & failure modes](docs/07-tuning.md) | every knob, what breaks, how you'll know |
+| [08 — Cycle segmentation](docs/08-cycle-segmentation.md) | **v2**: cutting on work cycles from hand tracks, and where it doesn't apply |
 
 ## Licence
 

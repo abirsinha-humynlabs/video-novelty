@@ -45,9 +45,15 @@ import numpy as np
 #: accidental sync into the wrong prefix is not a recoverable mistake. The
 #: check is here rather than in a runbook because a runbook cannot stop a
 #: mistyped --out.
-S3_RESULT_PREFIX = "s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result"
-S3_DATA_PREFIX = "s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_data"
-S3_WRITE_ALLOWLIST = (S3_RESULT_PREFIX, S3_DATA_PREFIX)
+_STAGE = "s3://stage-humyn-egocentric-stereo-data/labelling_results"
+#: v2 = the cycle-aware (hand-track driven) run. v1 was strict 30 s chunking and
+#: is kept so its results stay comparable rather than overwritten.
+S3_RESULT_PREFIX = f"{_STAGE}/novelty_result_v2"
+S3_DATA_PREFIX = f"{_STAGE}/novelty_data_v2"
+S3_WRITE_ALLOWLIST = (
+    S3_RESULT_PREFIX, S3_DATA_PREFIX,
+    f"{_STAGE}/novelty_result", f"{_STAGE}/novelty_data",   # v1, still writable
+)
 
 
 def check_s3_destination(uri: str) -> None:

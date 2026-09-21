@@ -4,9 +4,72 @@
 what was measured, what is broken, and what to do next. The `docs/` directory
 explains *how the code works*; this file explains *where the project is*.
 
-Last updated: 2026-09-18 · commit `c1bd9ae` + uncommitted work · repo `abirsinha-humynlabs/video-novelty`
+Last updated: 2026-09-21 · repo `abirsinha-humynlabs/video-novelty`
 
-> **2026-09-18 session changed the picture substantially. Read §0 first.**
+> **Read §00 (v2 — the current direction) first, then §0. The 2026-09-18 work
+> in §0 is still valid; v2 is built on top of it.**
+
+---
+
+## 00. v2 — cycle-aware chunking (2026-09-21, IN PROGRESS)
+
+**The project now has a commercial target with 435 labelled examples.** Customer
+QA rejected 766 episodes. 435 (57%) say *"Repetitive motion or repeated simple
+work; Needs a shorter usable segment"* (median 366 s, hands active 95%, on
+objects 90%); 312 (41%) say *"Idle or stalled task progress"*. The deliverable:
+given a long repetitive episode, output the shorter segment a customer would
+accept. Full reasoning and every failed approach is in
+**`docs/08-cycle-segmentation.md`**. `rejected_episodes.csv` is the label file
+(gitignored — it carries per-episode customer data).
+
+**What changed mechanically:** v1 cut a strict 30 s grid, slicing through work
+cycles at a random phase. v2 derives cut points from **hand-track periodicity**
+so each chunk is a whole number of repetitions starting at the same phase. New
+module `novelty/cycles.py`, new runner `scripts/run_v2.py`.
+
+**The most important result is a negative one:**
+
+> **[Certain] Customer-"repetitive" and signal-"periodic" are different
+> properties, and only the second yields cut points.** Of 5 episodes
+> ground-truth-rejected as repetitive, **1** had detectable cadence. Of 8
+> Pipe_Factory segments, **0**. Of 8 prod episodes, **2 (25%)**. Best
+> periodicity strength: 0.89 for the one machine-paced case, 0.24–0.51 for the
+> rest; widening the period search 8 s → 40 s changed nothing. Cycle
+> segmentation serves the machine-paced **minority (~15–25%)** — it is not a
+> replacement for fixed chunking, and most of the 766 will yield empty CSVs.
+
+`trackable_fraction` and `cadence_fraction` are reported separately so "we could
+not see the hands" is never mistaken for "this work is not repetitive".
+
+| phase | what | measured | 766 projection |
+|---|---|---|---|
+| A | segment from NPZ, no video | **56 ms/episode** | ~45 s |
+| B | download → cut → DINOv2 | **6.8 s/chunk + 5.2 s/episode** | ~2.25 h @25% yield |
+| C | global whitener + null → per-episode CSV | seconds | < 1 min |
+
+Outputs: CSVs → `labelling_results/novelty_result_v2/`, chunks →
+`novelty_data_v2/`. Phase B is idempotent (per-episode `done` marker), so the
+runner is safe to kill and restart at any point.
+
+**`run_v2.py drain`** polls prod for new NPZs every 5 min and processes what has
+landed. **Poll BOTH `model_output/` and `model_output_fullrate/`** — both are
+written concurrently and each holds episodes the other does not, so polling one
+silently loses episodes (verified by set difference).
+
+**The binding constraint is not this pipeline.** Their hand-detection model
+produced 11 episodes in ~35 min ≈ **36/hour**; 766 needs ~60/hour to hit the
+deadline. Levers: more workers on their side (`_launch.sh` runs 2 per host), or
+process only the 435 repetitive-rejected episodes, which makes it at 36/hour.
+
+**Not carried over from v1:** the calibrated decision layer. AUC 0.998 and
+`env_percentile: 60` were measured on DINOv2 *appearance* features from video;
+pose-only similarity is **uncalibrated** until there is ground truth for "same
+action". Tier 0 cannot fire on the NPZ-only route (no frames → no pHash).
+
+**No `head.npz` in the prod output.** Ablation showed head pose prevents a
+specific failure: without it, one episode's period read 2.55 s instead of
+1.30 s (harmonic doubling), which halves or doubles every boundary. Camera
+frame works, but ask for head pose if it is cheap to emit.
 
 ---
 
@@ -928,8 +991,10 @@ answered at video level.
 | `docs/05-coverage-selection.md` | submodularity, the greedy guarantee, reading the knee |
 | `docs/06-running-on-gpu.md` | DINOv2, V-JEPA 2, throughput, scaling the store |
 | `docs/07-tuning.md` | every knob, every failure mode and how to recognise it |
+| `docs/08-cycle-segmentation.md` | **v2**: hand-track cycle cutting, the four traps, measured yield |
 | `eval/pairs.yaml` | the label file — its header documents its own inadequacy |
 | `scripts/report_csv.py` | the `output/` CSVs: what each column means |
+| `scripts/run_v2.py` | the v2 three-phase runner and the drain loop |
 | `configs/gpu-cosmos.yaml` | why Cosmos-Embed1 is task-axis-only, and the fps/clip_len reasoning |
 
 **Docs not yet updated for 2026-09-18.** `docs/04-calibration.md` and
