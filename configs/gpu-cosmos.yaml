@@ -44,14 +44,27 @@ hashing:
   fps: 2.0
   max_hamming: 8
   min_overlap_seconds: 2.0
+  # DUPLICATE_SOURCE also needs the match to cover this fraction of a clip.
+  # Repetitive bench work repeats a ~5s cycle at a fixed head pose, so
+  # disjoint chunks DO contain contiguous matching runs; they just never
+  # cover much of the clip, whereas a re-encode covers ~all of it.
+  min_overlap_fraction: 0.5
 
 decision:
-  # 52 = best-F1 operating point measured on two Pipe_Factory sessions
-  # (DINOv2, AUC 0.998, 4.4 sigma). It is tied to that corpus being 49%
-  # same-environment pairs -- add sessions and re-fit with
-  # `calibrate --labels`, which prints the best-F1 percentile.
-  env_percentile: 52.0
+  # 60 = best-F1 (0.969) over 741 pairs from THREE sessions: two Pipe_Factory
+  # stations plus an Automobile_Manufacturing plant. It was 52 when fitted on
+  # the two pipe sessions alone; adding a third environment moved it, and at 52
+  # 11.3% of genuinely different pairs were called same-place. The threshold
+  # tracks the corpus, so re-fit when you add sessions.
+  # 62.5 gives zero false positives here and still keeps 90% of true
+  # redundants -- prefer it if dropping good footage is the costlier error.
+  env_percentile: 60.0
   task_percentile: 95.0
+  # task axis is REPORTED but does not gate the verdict: measured best-F1
+  # 0.905 vs the env axis's 0.969, correlates +0.82 with it, and ranks an
+  # automobile plant closer to pipe-factory A than pipe-factory B is.
+  # See config.DecisionConfig for what would turn it back on.
+  use_task_axis: false
 
 segment:
   seconds: 30.0

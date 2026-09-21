@@ -49,10 +49,31 @@ class MotionConfig:
 
 @dataclass
 class HashConfig:
+    """Tier 0: did these two clips share literal footage?
+
+    ``min_overlap_fraction`` is what stops DUPLICATE_SOURCE from firing on
+    repetitive work, and it exists because the obvious fixes do not work.
+    Machine-paced manual work at a fixed bench repeats a ~5 s cycle with the
+    same head pose, so two genuinely disjoint chunks contain matching runs of
+    frames that are contiguous, consistently offset, and internally varying --
+    every property that normally distinguishes real shared footage. Measured on
+    the automobile corpus: disjoint chunks minutes apart matched for 2-5 s.
+    pHash simply cannot separate "same footage" from "same action, same
+    viewpoint, performed again" in this domain.
+
+    What it CAN separate is scale. Actually shared footage -- a re-encode, or
+    two cuts made with overlapping spans -- shares most of the shorter clip.
+    Coincidental repetition shares a small slice of it (6-33% in the measured
+    cases). So the DECISION requires a substantial fraction, while detection
+    stays sensitive and the measured overlap is still reported in the verdict.
+    That matters because DUPLICATE_SOURCE overrides every semantic axis, so it
+    should only fire when the clips really are substantially the same.
+    """
     enabled: bool = True
     fps: float = 2.0
     max_hamming: int = 8
     min_overlap_seconds: float = 2.0
+    min_overlap_fraction: float = 0.5
 
 
 @dataclass
@@ -67,18 +88,38 @@ class DecisionConfig:
     The right value tracks how redundant your corpus already is. A percentile
     threshold asks "is this pair in the top (100-p)% of my corpus", so it only
     means "same environment" when same-environment pairs are about that rare.
-    52 is the best-F1 operating point measured on two Pipe_Factory sessions
-    (AUC 0.998, 4.4 sigma) where 49% of pairs were same-environment. Feed in
-    twenty sessions and the same-environment base rate falls, so re-fit it --
-    `calibrate --labels` prints the best-F1 percentile for exactly this reason.
+    That value moves when the corpus does, and has already moved once: fitted on
+    two Pipe_Factory sessions (49% same-environment pairs) it came out at 52;
+    adding an Automobile_Manufacturing session (41.7% same-environment) moved it
+    to 60. At 52 against three environments, 11.3% of genuinely different pairs
+    were called same-place. Re-fit whenever you add sessions -- the threshold
+    sweep in `calibrate --labels` prints the best-F1 point.
 
-    task_percentile is NOT similarly measured. Every labelled pair available so
-    far varies environment and task together, so any task number is confounded
-    (WORK.md section 6). 95 is a deliberately conservative placeholder: it makes
-    REDUNDANT hard to reach, which is the safe direction to be wrong in.
+    60 is best-F1 (0.969) over 741 pairs from three sessions. Zero-false-positive
+    on that corpus is 62.5, which still keeps 90% of true redundants -- worth
+    preferring, because the two errors are not symmetric: a false REDUNDANT
+    DROPS footage and is unrecoverable, a false NOVEL only keeps something you
+    did not need.
+
+    use_task_axis is OFF, which is a deliberate retreat from the quadrant model.
+    Measured on the same corpus, the task axis is strictly the weaker
+    discriminator (best F1 0.905 vs 0.969; zero-FP threshold keeps 47% of true
+    redundants vs 90%), correlates +0.82 with the environment axis, and orders
+    domains WRONG -- it rates an automobile plant more task-similar to pipe
+    factory A than pipe factory B is. Letting a detector that behaves like that
+    gate the verdict produces confident, wrong labels such as
+    SAME_PLACE_NEW_TASK for two unrelated industries.
+
+    The cost is real and should not be forgotten: with the task axis off, two
+    DIFFERENT jobs filmed in the SAME room both read REDUNDANT, and those are
+    precisely the samples a physical-AI dataset is short of. We give that up
+    because we currently cannot detect it, not because it stopped mattering.
+    Turn this back on when a SAME_PLACE_NEW_TASK eval set exists (WORK.md s6)
+    and the task axis clears a measured bar on it.
     """
-    env_percentile: float = 52.0
+    env_percentile: float = 60.0
     task_percentile: float = 95.0
+    use_task_axis: bool = False
 
 
 @dataclass

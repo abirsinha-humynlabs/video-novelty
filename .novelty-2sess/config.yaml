@@ -29,9 +29,15 @@ hashing:
   fps: 2.0
   max_hamming: 8
   min_overlap_seconds: 2.0
+  # DUPLICATE_SOURCE also needs the match to cover this fraction of a clip.
+  # Repetitive bench work repeats a ~5s cycle at a fixed head pose, so
+  # disjoint chunks DO contain contiguous matching runs; they just never
+  # cover much of the clip, whereas a re-encode covers ~all of it.
+  min_overlap_fraction: 0.5
 decision:
-  env_percentile: 52.0
+  env_percentile: 60.0
   task_percentile: 95.0
+  use_task_axis: false
 segment:
   seconds: 30.0
   hop: 30.0

@@ -78,12 +78,24 @@ def source_overlap(
     ha: np.ndarray, ta: np.ndarray,
     hb: np.ndarray, tb: np.ndarray,
     *, max_hamming: int = 8, offset_bin: float = 0.5, min_votes: int = 3,
+    max_gap_frames: int = 2,
 ) -> SourceOverlap:
     """Find the dominant time offset that aligns two hash streams.
 
     For every near-matching frame pair (i, j) we cast a vote for the offset
     ``tb[j] - ta[i]``. Shared footage produces a tall spike at one offset; two
     unrelated videos produce a flat, low histogram. Returns the spike.
+
+    ``overlap_seconds`` measures the longest **contiguous** run of aligned
+    frames, not the total number of them. That distinction is the difference
+    between a true and a false positive on repetitive manual work: two disjoint
+    segments of one recording, filmed at the same bench with a near-static head
+    pose, genuinely contain individual frames that are near-identical pixels,
+    and enough of them land in one offset bin to clear a vote count. What they
+    never contain is a continuous *stretch* of the same frames -- only actually
+    shared footage does. Counting votes flagged two disjoint automobile-plant
+    chunks as DUPLICATE_SOURCE off four scattered frames; measuring the run
+    does not. ``max_gap_frames`` tolerates a dropped match inside a real run.
     """
     empty = SourceOverlap(0.0, 0.0, 0, 0.0, 0.0)
     if len(ha) == 0 or len(hb) == 0:
@@ -101,13 +113,23 @@ def source_overlap(
     best_bin = uniq[k]
     sel = bins == best_bin
     # distinct source frames that participate in the winning alignment
-    n_a = len(np.unique(ii[sel]))
-    n_b = len(np.unique(jj[sel]))
+    idx_a = np.unique(ii[sel])
+    idx_b = np.unique(jj[sel])
+
+    def longest_run(idx: np.ndarray) -> int:
+        if len(idx) == 0:
+            return 0
+        splits = np.where(np.diff(idx) > max_gap_frames)[0] + 1
+        return max(len(r) for r in np.split(idx, splits))
+
+    run_a, run_b = longest_run(idx_a), longest_run(idx_b)
+    if min(run_a, run_b) < min_votes:
+        return empty
     step_a = float(np.median(np.diff(ta))) if len(ta) > 1 else 0.5
     return SourceOverlap(
-        overlap_seconds=float(n_a * step_a),
+        overlap_seconds=float(run_a * step_a),
         offset_seconds=float(best_bin * offset_bin),
         matched_frames=int(sel.sum()),
-        fraction_of_a=float(n_a / len(ha)),
-        fraction_of_b=float(n_b / len(hb)),
+        fraction_of_a=float(run_a / len(ha)),
+        fraction_of_b=float(run_b / len(hb)),
     )

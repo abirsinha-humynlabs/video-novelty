@@ -151,6 +151,25 @@ def duplicate_scores(a, b, *, max_hamming: int = 8) -> Dict[str, float]:
                           max_hamming=max_hamming).as_dict()
 
 
+def decide(env: float, task: float, decision) -> str:
+    """Percentiles -> label, the one place the decision rule lives.
+
+    With ``use_task_axis`` off this collapses to environment alone, because a
+    task axis that orders whole industries wrongly cannot be allowed to name a
+    quadrant. See config.DecisionConfig for the measurements behind that.
+    """
+    same_env = env >= decision.env_percentile
+    if not getattr(decision, "use_task_axis", False):
+        return Label.REDUNDANT if same_env else Label.NOVEL
+    same_task = task >= decision.task_percentile
+    return (
+        Label.REDUNDANT if (same_env and same_task) else
+        Label.SAME_PLACE_NEW_TASK if (same_env and not same_task) else
+        Label.SAME_TASK_NEW_PLACE if (same_task and not same_env) else
+        Label.NOVEL
+    )
+
+
 def compare(a, b, *, null=None, decision=None, hashing=None) -> Verdict:
     """Full comparison of two Signatures.
 
@@ -179,20 +198,23 @@ def compare(a, b, *, null=None, decision=None, hashing=None) -> Verdict:
         notes.append("no null model: scores are RAW, thresholds are meaningless. "
                      "Run `novelty calibrate` first.")
 
-    if dup.get("overlap_seconds", 0.0) >= hashing.min_overlap_seconds:
+    frac = max(dup.get("fraction_of_a", 0.0), dup.get("fraction_of_b", 0.0))
+    if (dup.get("overlap_seconds", 0.0) >= hashing.min_overlap_seconds
+            and frac >= getattr(hashing, "min_overlap_fraction", 0.0)):
         label = Label.DUPLICATE_SOURCE
     else:
-        same_env = env >= decision.env_percentile
-        same_task = task >= decision.task_percentile
-        label = (
-            Label.REDUNDANT if (same_env and same_task) else
-            Label.SAME_PLACE_NEW_TASK if (same_env and not same_task) else
-            Label.SAME_TASK_NEW_PLACE if (same_task and not same_env) else
-            Label.NOVEL
-        )
+        label = decide(env, task, decision)
+        if dup.get("overlap_seconds", 0.0) >= hashing.min_overlap_seconds:
+            notes.append(
+                f"tier 0 found {dup['overlap_seconds']:.1f}s of matching frames "
+                f"({frac:.0%} of a clip) but that is below min_overlap_fraction "
+                f"-- most likely repeated action, not shared footage")
 
     if a.motion_pooled is None or b.motion_pooled is None:
         notes.append("motion tier disabled: task score is not meaningful.")
+    if not getattr(decision, "use_task_axis", False):
+        notes.append("task axis reported but NOT gating the verdict "
+                     "(decision.use_task_axis=false) -- see config.DecisionConfig")
 
     return Verdict(a=a.label, b=b.label, label=label, env_score=float(env),
                    task_score=float(task), calibrated=calibrated,
@@ -229,14 +251,7 @@ def compare_windows(A, B, *, null=None, decision=None, hashing=None) -> Verdict:
     if any(v.label == Label.DUPLICATE_SOURCE for v in pairs):
         label = Label.DUPLICATE_SOURCE
     else:
-        same_env = env >= decision.env_percentile
-        same_task = task >= decision.task_percentile
-        label = (
-            Label.REDUNDANT if (same_env and same_task) else
-            Label.SAME_PLACE_NEW_TASK if (same_env and not same_task) else
-            Label.SAME_TASK_NEW_PLACE if (same_task and not same_env) else
-            Label.NOVEL
-        )
+        label = decide(env, task, decision)
 
     notes = list(dict.fromkeys(n for v in pairs for n in v.notes))
     env_sd = float(np.std([v.env_score for v in pairs]))

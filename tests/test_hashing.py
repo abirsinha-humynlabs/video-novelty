@@ -41,6 +41,38 @@ def test_disjoint_halves_are_not_source_duplicates(clips):
     assert ov.overlap_seconds < 1.0
 
 
+def test_scattered_matches_are_not_shared_footage():
+    """Repetitive work at a fixed bench produces coincidental frame matches.
+
+    Real case this guards: two DISJOINT 30 s chunks of one automobile-plant
+    recording were labelled DUPLICATE_SOURCE off four scattered near-identical
+    frames that happened to share an offset bin. On repetitive manual work with
+    a near-static head pose, individual frames seconds apart genuinely are the
+    same pixels -- what never happens without shared footage is a continuous
+    RUN of them. Overlap is measured as the longest contiguous run for exactly
+    this reason, and DUPLICATE_SOURCE overrides every semantic axis, so a false
+    positive here silently discards novel footage.
+    """
+    rng = np.random.default_rng(0)
+    n = 60
+    ha = rng.integers(0, 2**63, size=n, dtype=np.uint64)
+    hb = rng.integers(0, 2**63, size=n, dtype=np.uint64)
+    ta = tb = np.arange(n) * 0.5
+    # five isolated frames match at a constant offset of 0 -- scattered, never
+    # two in a row.
+    for i in (3, 11, 24, 37, 52):
+        hb[i] = ha[i]
+    ov = source_overlap(ha, ta, hb, tb)
+    assert ov.overlap_seconds < 2.0, (
+        f"scattered matches must not read as shared footage, got {ov}")
+
+    # the same number of matching frames, but CONTIGUOUS, is shared footage
+    hb2 = rng.integers(0, 2**63, size=n, dtype=np.uint64)
+    hb2[20:25] = ha[20:25]
+    ov2 = source_overlap(ha, ta, hb2, tb)
+    assert ov2.overlap_seconds >= 2.0, f"a contiguous run must be detected, got {ov2}"
+
+
 def test_phash_bits():
     g = np.zeros((2, 32, 32), np.uint8)
     g[1] = 255

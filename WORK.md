@@ -22,12 +22,17 @@ Four things, in order of how much they should change your plans:
 2. **The GPU path ran for the first time.** P1 is done. DINOv2, V-JEPA 2,
    VideoMAE and NVIDIA Cosmos-Embed1 all execute on an A10G. Three missing
    dependencies and three silent bugs were found doing it (§7).
-3. **`decision.env_percentile` moved 97 → 52**, because it was measured rather
-   than guessed. This is the single most consequential config change in the
-   repo's history and it is corpus-dependent — read §5.3 before trusting it
-   anywhere else.
-4. **The environment is no longer the 2-core container described in old §9.**
-   It is a Linux box with an A10G. §9 is rewritten.
+3. **`decision.env_percentile` moved 97 → 52 → 60**, because it is measured
+   rather than guessed, and it moved again the moment a third environment
+   arrived. It is corpus-dependent — read §5.1 before trusting it anywhere else.
+4. **The quadrant model is switched off. The verdict is now environment-only**
+   (`decision.use_task_axis: false`). This is a retreat from the repo's founding
+   design and it was forced by measurement, not preference — see §4.1a. The task
+   axis ranks an automobile plant as more task-similar to pipe-factory A than
+   pipe-factory B is. Read that before you turn it back on.
+5. **The environment is no longer the 2-core container described in old §9.**
+   It is a Linux box with an A10G, video is never kept on local disk, and
+   results go to S3. §9 is rewritten.
 
 ---
 
@@ -48,9 +53,9 @@ and selects a maximally-diverse subset by submodular coverage maximisation.
 
 | tier | what it answers | status |
 |---|---|---|
-| 0 — perceptual hash | did these share literal footage? | **works**, tested |
-| 1 — appearance | same physical place? | **validated**, AUC 0.998 vs a real hard negative |
-| 2 — motion/task | same work happening? | **still unvalidated** — every number is confounded |
+| 0 — perceptual hash | did these share literal footage? | **works**; false-positive on repetitive static-view work fixed 2026-09-20 (§7 bug 10) |
+| 1 — appearance | same physical place? | **the product.** Decides the verdict alone. 0.973 accuracy over 741 pairs, 3 environments |
+| 2 — motion/task | same work happening? | **switched off** (§4.1a). Reported as a diagnostic, does not gate anything |
 
 **The single most important fact for you:** the task tier is unvalidated, and
 *you still cannot fix it by writing code*. Every labelled pair that exists —
@@ -199,6 +204,44 @@ from "sweeping the floor" in the same room. So a comparison returns a quadrant:
 The two "keep" quadrants are the samples a physical-AI dataset is short of. A
 single fused scalar deletes both. **Do not collapse this to one number.**
 
+### 4.1a …and yet it IS collapsed right now. Read why before restoring it.
+
+**Status 2026-09-20: `decision.use_task_axis` is `false`. The verdict is
+environment-only — `REDUNDANT` or `NOVEL`, plus tier 0.** §4.1's argument above
+is still correct in principle, which is why it is left standing. What changed is
+that we measured the task axis against three environments and it is not fit to
+name a quadrant:
+
+| | environment axis | task axis |
+|---|---|---|
+| best F1 (741 pairs, 3 sessions) | **0.969** | 0.905 |
+| zero-false-positive threshold | 62.5, keeps **90%** of true redundants | 80.5, keeps **47%** |
+| correlation with the other axis | — | **+0.82** |
+| orders domains correctly? | yes | **no** — see below |
+
+The disqualifying result: on `task_raw`, pipe-factory-A vs pipe-factory-B scores
+**−0.032**, while pipe-factory-A vs an **automobile plant** scores **+0.121**.
+The task axis says a different industry is *more* task-similar than a different
+station in the same industry. A detector that inverts across whole domains
+cannot be allowed to decide between `REDUNDANT` and `SAME_PLACE_NEW_TASK` — it
+produced exactly that failure in practice, labelling automobile-vs-pipe-factory
+pairs `SAME_PLACE_NEW_TASK`.
+
+**Why the task axis is hard here, beyond the label confound (§6):** this is
+cluttered egocentric factory footage. Other workers move through frame, machines
+run in the background, and the wearer's head turns constantly. Dense flow
+integrates *all* of that, so the descriptor is dominated by scene activity
+rather than by what the wearer's hands are doing. Meanwhile `task_cos` comes
+from V-JEPA 2, which reads RGB and so re-imports appearance (§5.5). Between
+them, very little of the task axis is actually about the task.
+
+**What we knowingly gave up:** two different jobs filmed in the same room now
+both read `REDUNDANT`, and one gets dropped. That is the single most valuable
+sample type for a physical-AI dataset. We accept that cost because we cannot
+currently *detect* that case — being honestly coarse beats being confidently
+wrong. The switch is one config field; flip it back when §6's eval set exists
+and the task axis clears a measured bar on it.
+
 ### 4.2 Calibration — the part that makes numbers mean anything
 
 Two stages, both in `calibrate.py`:
@@ -277,7 +320,44 @@ cross-session confusions.**
 > practical question ("is this more of what I already have?") that is the right
 > quantity. For a claim about place recognition specifically, it is not isolated.
 
-### 5.1 Threshold: why `env_percentile` moved 97 → 52
+### 5.0a Three environments (2026-09-20) — the test that changed the design
+
+A third session was added: `Automobile_Manufacturing / RCB-13`, 3 × 30 s chunks
+(black metal automotive parts, grinding at a machine, metal floor plate).
+Against the two Pipe_Factory sessions this gives two *tiers* of negative:
+
+* **hard** — S36 vs S9: same industry, different station
+* **easy** — either vs AUTO: different industry entirely
+
+A metric that measures environment should separate the easy pair further than
+the hard one. **It does not:**
+
+| pairing | `env_raw` |
+|---|---|
+| within S36 | +0.559 |
+| S36 vs S9 (hard negative) | **+0.096** |
+| S36 vs AUTO (easy negative) | **+0.090** |
+
+**[Certain] The environment axis saturates.** Beyond "not the same place" it
+carries no information about *how* different two places are. It is a good
+detector and a bad distance. Do not build anything that needs graded
+environmental distance on top of `env_raw` without re-checking this.
+
+Caveat on the strength of this test: the corpus is 36 pipe-factory signatures
+against 3 automobile ones, so the whitener is ~92% pipe factory and the AUTO
+chunks sit far from a mean they barely influenced. **Ingest ~18 automobile
+chunks before treating the saturation result as final.**
+
+End-to-end accuracy of the shipped rule over all 741 pairs, ground truth =
+session identity:
+
+```
+correctly dropped (redundant) 293    correctly kept 428
+FALSE DROP (different env)      4    missed redundancy 16
+precision 0.987   recall 0.948   accuracy 0.973
+```
+
+### 5.1 Threshold: why `env_percentile` moved 97 → 52 → 60
 
 The best-F1 operating point above sits at the **52nd percentile** of the corpus
 null. The repo shipped 97.
@@ -288,18 +368,31 @@ This corpus is **49% same-environment pairs**, so 97 can only ever fire on
 near-duplicates — which is exactly why two adjacent chunks of one continuous
 recording kept returning `NOVEL` and looked like a broken detector.
 
-**This value is corpus-dependent and will be wrong for your next corpus.** Add
-twenty sessions, the same-environment base rate collapses, and the correct
-percentile rises. `calibrate --labels` prints the best-F1 percentile; re-fit it
-rather than inheriting 52. The number is now in `configs/*.yaml` and
-`config.DecisionConfig`, with that reasoning in a comment at each site.
+**This value is corpus-dependent** — and that is not a theoretical warning, it
+has already happened once. Adding the third session dropped the
+same-environment base rate from 49% to 41.7% and moved best-F1 from 52 to
+**60**. Left at 52, **11.3% of genuinely different pairs (49 of 432) were
+called same-place**, including 13 automobile-vs-pipe-factory pairs. Threshold
+sweep over the three-session corpus:
 
-`task_percentile` was deliberately **left at 95**, unmeasured. Its best-F1 point
-(48.5) comes from confounded labels, so shipping it would be laundering a
-guess into a measurement. 95 makes `REDUNDANT` hard to reach, which is the safe
-direction to be wrong in. Consequence you will see: two adjacent chunks of
-identical repetitive work currently label `SAME_PLACE_NEW_TASK`, not
-`REDUNDANT`. That is the task tier being untrusted, working as intended.
+| threshold | false positives | missed | precision | recall | F1 |
+|---|---|---|---|---|---|
+| 50 | 63 | 1 | 0.830 | 0.997 | 0.906 |
+| 55 | 28 | 4 | 0.916 | 0.987 | 0.950 |
+| **60** | **4** | **16** | **0.987** | **0.948** | **0.967** |
+| 62.5 | **0** | 32 | **1.000** | 0.897 | 0.946 |
+| 65 | 0 | 49 | 1.000 | 0.841 | 0.914 |
+
+**The two errors are not symmetric.** A false `REDUNDANT` *drops* footage and is
+unrecoverable; a false `NOVEL` merely keeps something you did not need. That
+asymmetry argues for 62.5 over 60 — 62.5 is zero-false-positive on this corpus
+and still catches 90% of true redundants. We ship 60 (best F1) because zero-FP
+on 741 pairs is thin evidence, but **raise it if a dropped clip is expensive to
+you.** `calibrate --labels` prints the best-F1 point; re-fit rather than
+inheriting any of these numbers.
+
+`task_percentile` stays at 95 and **no longer affects the verdict at all**
+(§4.1a). It is still computed and still written to `pairs.csv`, as a diagnostic.
 
 ### 5.2 Throughput measured on the A10G
 
@@ -423,6 +516,29 @@ verified correct**; what is missing is real data in the missing quadrant.
 
 All of them produced confident, plausible, entirely meaningless output. None
 raised an error. They are documented in code comments at the fix sites.
+
+### Found 2026-09-20
+
+**10. Tier 0 counted votes instead of measuring a run — `hashing.source_overlap`.**
+`chunk02_030-060` vs `chunk03_060-090` of the automobile session — **disjoint**
+segments — were labelled `DUPLICATE_SOURCE` off **4 scattered** matching pHash
+frames that happened to land in one offset bin: 4 × 0.5 s = exactly the 2.0 s
+`min_overlap_seconds`, at 7% of each clip.
+
+They share no footage. On repetitive manual work with a near-static head pose,
+individual frames seconds apart genuinely *are* near-identical pixels — that is
+pHash working correctly. What two disjoint segments never contain is a
+continuous **run** of identical frames; only actually shared footage does.
+Fix: `overlap_seconds` is now the longest *contiguous* run of aligned frames
+(`max_gap_frames=2` tolerates a dropped match), not the total vote count, and
+the run must itself clear `min_votes`. Re-encode detection is unaffected —
+those produce long runs. Regression test:
+`test_hashing.py::test_scattered_matches_are_not_shared_footage`.
+
+**This one mattered disproportionately:** `DUPLICATE_SOURCE` overrides every
+semantic axis, so a false positive silently discards novel footage with no
+appeal. → *When a rule overrides all others, its false-positive behaviour is
+the only behaviour that matters.*
 
 ### Found 2026-09-18
 
@@ -755,14 +871,49 @@ verdicts of an existing index. Either pass `--config` explicitly or edit
 Writes into `output/`, mirroring the source tree:
 
 ```
-output/normalized/bitrobot/Pipe_Factory/2026-08-27/<PIP>/<session>/000/
+output/<mirrored source key>/
     chunks.csv   one row per chunk: span, detected period + strength, nearest
                  neighbour and which session it is in, env/task percentiles,
                  verdict, within- vs cross-session similarity, coverage
                  selection rank and marginal gain
     pairs.csv    every comparison behind those numbers
+output/videos.csv    VIDEO-level similarity, one row per pair of recordings
 output/summary.csv   per-session within/cross means
 ```
+
+### Video-level matching (`videos.csv`)
+
+A 10-minute recording is **not** turned into one vector — averaging its chunks
+deletes precisely the brief exception that makes a recording worth keeping. A
+video is its *set* of chunk signatures, and two videos are compared set-to-set,
+the same operation `env_chamfer` already performs one level down over frames.
+
+```
+coverage(A|B) = fraction of A's chunks whose best match anywhere in B
+                clears decision.env_percentile
+```
+
+**Directional on purpose.** A short recording can sit entirely inside a longer
+one while the longer one still holds material the short one never saw, and one
+symmetric number cannot express that. Measured on the current corpus:
+
+| pair | cov(A\|B) | cov(B\|A) | verdict |
+|---|---|---|---|
+| RCB-13 vs PIP-246 | 0.00 | 0.00 | `DISTINCT` |
+| RCB-13 vs PIP-250 | 0.00 | 0.00 | `DISTINCT` |
+| PIP-246 vs PIP-250 | **1.00** | **0.72** | `A_CONTAINED_IN_B` |
+
+Read that last row: every PIP-246 chunk has a match in PIP-250, but 5 of
+PIP-250's 18 do not have one in PIP-246 — so PIP-250 is the superset and
+PIP-246 adds nothing over it. That is the "which 200 of my 2000 hours" question
+answered at video level.
+
+> **[Certain] Do not over-trust the 0.72.** Those 5 "novel" chunks score 56.0,
+> 57.5, 58.7, 59.5 and 59.8 against a threshold of 60 — every one of them is
+> within 4 points of the cutoff. At a threshold of 55 the coverage would read
+> 1.00 and the conclusion would invert. The distribution is dense exactly where
+> the threshold sits, so coverage is fragile on this corpus. Report the
+> `mean_best_env_pct` columns alongside it, which are threshold-free.
 
 ---
 
@@ -788,5 +939,5 @@ code and this file are correct; those three docs lag. Fix them when you touch
 that area.
 
 Code comments at every non-obvious decision explain the *why*, especially at the
-nine bug sites in §7. If you change something there, update the comment; the
+ten bug sites in §7. If you change something there, update the comment; the
 next agent after you will rely on it the way you are relying on this file.

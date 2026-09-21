@@ -205,6 +205,57 @@ def main() -> int:
                 w.writerows(data)
             written.append((p, len(data)))
 
+    # ---- video-level similarity -----------------------------------------
+    # A 10-minute recording cannot be one vector: averaging its chunks deletes
+    # exactly the brief exception that makes a recording worth keeping. So a
+    # video is its SET of chunk signatures, and two videos are compared
+    # set-to-set, the same operation env_chamfer already performs one level
+    # down over frames.
+    #
+    # coverage(A|B) = fraction of A's chunks whose best match anywhere in B
+    # clears the environment threshold. It is DIRECTIONAL on purpose: a short
+    # recording can sit entirely inside a longer one while the longer one still
+    # holds material the short one never saw. A single number cannot say that.
+    thr = cfg.decision.env_percentile
+    sess_names = sorted(rows_by_sess)
+    vid = os.path.join(out_dir, "videos.csv")
+    vrows = []
+    for sa, sb in itertools.combinations(sess_names, 2):
+        ia = [i for i in range(n) if sess[i] == sa]
+        ib = [i for i in range(n) if sess[i] == sb]
+        best_a = [max(env[i, j] for j in ib) for i in ia]   # each A chunk -> best B
+        best_b = [max(env[j, i] for i in ia) for j in ib]
+        cov_ab = sum(1 for v in best_a if v >= thr) / len(ia)
+        cov_ba = sum(1 for v in best_b if v >= thr) / len(ib)
+        cross = [env[i, j] for i in ia for j in ib]
+        if cov_ab >= 0.8 and cov_ba >= 0.8:
+            verdict = "DUPLICATE_COVERAGE"
+        elif cov_ab >= 0.8:
+            verdict = "A_CONTAINED_IN_B"
+        elif cov_ba >= 0.8:
+            verdict = "B_CONTAINED_IN_A"
+        elif max(cov_ab, cov_ba) >= 0.3:
+            verdict = "PARTIAL_OVERLAP"
+        else:
+            verdict = "DISTINCT"
+        vrows.append({
+            "video_a": sa, "video_b": sb,
+            "chunks_a": len(ia), "chunks_b": len(ib),
+            "coverage_a_in_b": round(cov_ab, 3),
+            "coverage_b_in_a": round(cov_ba, 3),
+            "mean_best_env_pct_a": round(float(np.mean(best_a)), 2),
+            "mean_best_env_pct_b": round(float(np.mean(best_b)), 2),
+            "mean_env_pct": round(float(np.mean(cross)), 2),
+            "max_env_pct": round(float(np.max(cross)), 2),
+            "env_threshold": thr,
+            "verdict": verdict,
+        })
+    with open(vid, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=list(vrows[0].keys()))
+        w.writeheader()
+        w.writerows(vrows)
+    written.append((vid, len(vrows)))
+
     # corpus-level summary
     summ = os.path.join(out_dir, "summary.csv")
     with open(summ, "w", newline="") as fh:
