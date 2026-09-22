@@ -103,18 +103,27 @@ python scripts/task_axis.py env_pairs.csv env_pairs_by_industry.csv   # uploads 
 ## 2. The conversation
 
 Claude Code stores each session as one JSONL under
-`~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`. The directory name is
-the working directory with `/` replaced by `-`, so **the repo has to sit at the
-same absolute path on the new machine** or Claude Code will not list the
-session.
+`~/.claude/projects/<escaped-cwd>/<session-id>.jsonl`. **The repo has to sit at
+the same absolute path on the new machine** or Claude Code will not list the
+session — it finds sessions by the current working directory, not by searching.
+
+The directory name replaces **both `/` and `_`** with `-`. Getting that wrong
+is the easy mistake here:
+
+```
+/home/ec2-user/projects_abir/video-novelty
+  slashes only   -> -home-ec2-user-projects_abir-video-novelty   WRONG
+  slashes and _  -> -home-ec2-user-projects-abir-video-novelty   correct
+```
 
 This session:
 
 ```
-path:       /home/ec2-user/projects_abir/video-novelty
-dir:        ~/.claude/projects/-home-ec2-user-projects-abir-video-novelty/
-session id: 65787d15-db72-45ee-9584-48d002d3ef19
-size:       ~14 MB
+path:        /home/ec2-user/projects_abir/video-novelty
+dir:         ~/.claude/projects/-home-ec2-user-projects-abir-video-novelty/
+session id:  65787d15-db72-45ee-9584-48d002d3ef19
+size:        ~15 MB, 5551 lines, verified valid JSONL
+claude ver:  2.1.278
 ```
 
 On the old machine:
@@ -138,8 +147,23 @@ claude --resume 65787d15-db72-45ee-9584-48d002d3ef19
 If the repo must live at a different path, rename the directory under
 `~/.claude/projects/` to match the new path in the same `/` to `-` form.
 
-**The transcript is a conversation, not a backup.** It does not carry the
-scratchpad, so restore `state/` from S3 regardless.
+### What resuming does and does not restore
+
+Verified on this machine: `--resume <id>` and `-r` exist in 2.1.278, the
+session file is valid, and its `sessionId` matches its filename.
+
+It restores the **conversation** — everything said and every tool result, so
+the reasoning and the numbers come back. It does **not** restore anything
+outside it:
+
+- the scratchpad (gone with the instance) — restore `state/` from S3
+- the AWS sessions — `aws sso login --profile prod` again
+- the MCP connectors — they reattach per machine
+- the artifacts are account-level and unaffected; the four links keep working
+
+So expect to re-run the setup in section 1 before asking it to continue work.
+`--fork-session` starts a new session id from the same history if you would
+rather not append to this one.
 
 ## 3. Open threads
 
