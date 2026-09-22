@@ -63,3 +63,11 @@ Copy of *.xlsx
 *.tar.gz
 *.tgz
 claude-session.*
+
+# The delivered master list: 25,762 rows of per-episode customer data
+# (operator_id, age/gender/handedness, business name and street address,
+# city/state, task descriptions). Same class as the QA exports above and
+# excluded for the same reason. 28 MB, and it is an input pulled from a
+# delivery manifest, not source.
+delivered_*_master_list.csv
+pick_*h.csv
