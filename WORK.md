@@ -94,6 +94,53 @@ only leaves a redundant clip in the set.
 range where it is easy.** A threshold fitted to easy pairs will look perfect
 and be wrong.
 
+**Round 3 confirmed it and closed the question.** 50 more pairs, sampled only
+from the refit band, 100 clips, none reused, blind. Same shape as round 2 —
+4 same, 37 different, 9 unsure — and over all 138 labels:
+
+```
+ALL LABELS         n=138   same 21   different 89   unsure 28
+AUC combined                       0.9056
+AUC inside the band (7 v 70)       0.6398   <- barely above chance
+best F1  0.8333 at env_raw >= 0.4919   precision 1.000  recall 0.714
+zero-FP cut          >= 0.4920         catches 15/21
+```
+
+The best-F1 cut over 138 labels lands at **0.4919**, i.e. the 0.4920 already
+deployed. **The threshold needed no change** — three independent rounds of
+labelling converged on it, and the second and third were drawn specifically to
+break it.
+
+The band AUC of **0.6398** is the important number. The env axis carries
+almost no information between 0.4666 and 0.4920 — it is not mis-scaled there,
+it is blind there. Combined with the local-matching negative result below,
+that is two independent lines of evidence that the band is genuinely
+ambiguous.
+
+**So BORDERLINE is collapsed rather than left unresolved.** Measured inside the
+band: 7 same against 70 different, so calling the whole band DIFFERENT_ENV is
+right **90.9%** of the time. The band is 2.9% of all pairs, so the cost is
+~0.26% of the corpus mislabelled — cheaper than shipping rows a consumer
+cannot act on. Both CSVs therefore carry BOTH:
+
+| column | BORDERLINE rows |
+|---|---|
+| `verdict_calibrated` / `verdict_quadrant` | kept as `BORDERLINE` / `BORDERLINE_ENV` — the honest flag |
+| `verdict_resolved` / `verdict_quadrant_resolved` | forced to `DIFFERENT_ENV` and a real quadrant — the actionable column |
+
+Resolved quadrant over the 13964 same-site pairs:
+
+```
+DISTINCT              10592   75.9%
+SAME_PLACE_NEW_TASK    2087   14.9%   keep
+REDUNDANT              1065    7.6%   the actionable set
+SAME_TASK_NEW_PLACE     149    1.1%   keep
+NO_TASK_DATA             71    0.5%
+```
+
+**No unresolved rows.** Use `verdict_quadrant_resolved` downstream and
+`verdict_quadrant` when you need to know where the model was unsure.
+
 ### Held out, and still holding
 
 No round of labelling touched these strata. Sensitivity and specificity both
@@ -227,13 +274,16 @@ backbone.
 .venv/bin/python eval/exp_local_place_frames.py && .venv/bin/python eval/exp_local_place_matching.py
 ```
 
-`eval/human_labels_all.csv` holds all 88 judgements, so both operating points
-can be re-derived from raw labels rather than trusted.
+`eval/human_labels_all.csv` holds all 138 judgements across the three rounds,
+so both operating points can be re-derived from raw labels rather than trusted.
 
 ### What is left on task1
 
-- **401 BORDERLINE pairs (2.9%).** Label ~50 more (round 3 is built) to narrow
-  the band, or accept 2.9% unresolved. Nothing algorithmic will fix them.
+- ~~401 BORDERLINE pairs~~ **CLOSED.** Round 3 labelled 50 of them; band AUC
+  0.6398 says the axis is blind in there, so they are collapsed to
+  DIFFERENT_ENV at a measured 90.9% hit rate. Do not spend more labelling
+  effort on this band — three rounds converged and the last two added no
+  threshold movement at all.
 - **71 pairs have no task description** (`NO_TASK_DATA`) — 2 episodes missing
   from the QA export.
 - One clip never embedded: `c9aaec51-2cd8-5145-8f22-46a31a35e733` (ffmpeg
@@ -938,7 +988,7 @@ camera. Worth knowing if you ever run this on rendered or looped content.
 ### P0 — ~~unblock the TASK axis~~ **RETIRED 2026-09-22 (§000)**
 This asked for new `SAME_PLACE_NEW_TASK` recordings before the task tier could
 be measured. It was answered without them: the QA export's task descriptions
-gave a text task axis at AUC 0.9768, and the 88 human labels supplied the
+gave a text task axis at AUC 0.9768, and the 138 human labels supplied the
 positives the eval set lacked. **The lesson is worth keeping — the data needed
 to unblock this had been sitting in a CSV in the repo the whole time.** Look
 there before asking for a new capture.
