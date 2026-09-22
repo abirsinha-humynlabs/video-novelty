@@ -41,7 +41,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from novelty import cycles as C                                   # noqa: E402
-from scripts.report_csv import S3_DATA_PREFIX, S3_RESULT_PREFIX, check_s3_destination  # noqa: E402
+from scripts.report_csv import S3_DATA_PREFIX, S3_TASK2_PREFIX, check_s3_destination  # noqa: E402
 
 STAGE_HAND = ("s3://stage-humyn-egocentric-stereo-data/labelling_results/hand_pose_mint")
 #: The runner's own OUT says model_output, but the files actually land in
@@ -358,9 +358,11 @@ def phase_c(args):
         with open(p, "w", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(rows[0].keys()))
             w.writeheader(); w.writerows(rows)
-    check_s3_destination(S3_RESULT_PREFIX)
-    sh(["aws", "s3", "sync", outdir, S3_RESULT_PREFIX, "--only-show-errors"])
-    print(f"  wrote {len(per_ep)} CSVs -> {S3_RESULT_PREFIX}")
+    # task2 subprefix, not the novelty_result_v2 root: these are per-episode
+    # within-video CSVs and must not land beside task1's whole-video pair files.
+    check_s3_destination(S3_TASK2_PREFIX)
+    sh(["aws", "s3", "sync", outdir, S3_TASK2_PREFIX, "--only-show-errors"])
+    print(f"  wrote {len(per_ep)} CSVs -> {S3_TASK2_PREFIX}")
     return 0
 
 

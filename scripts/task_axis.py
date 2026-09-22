@@ -54,6 +54,7 @@ import csv
 import math
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from typing import Dict, List, Tuple
@@ -61,6 +62,9 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+from scripts.report_csv import S3_TASK1_PREFIX, check_s3_destination  # noqa: E402
 QA_CSV = os.path.join(ROOT, "rejected_repetitive_shorter_segment.csv")
 CANON = "canon_task×site_h"
 
@@ -202,6 +206,7 @@ def annotate(path: str, tp: TaskProfiles, threshold: float | None) -> Tuple[floa
     a = auc(sims[canon], sims[~canon])
 
     stats = Counter()
+    resolved = Counter()
     sim_of = {id(r): s for r, s in zip(have, sims)}
     for r in rows:
         ok = r["video_a"] in tp and r["video_b"] in tp
@@ -223,13 +228,32 @@ def annotate(path: str, tp: TaskProfiles, threshold: float | None) -> Tuple[floa
             r["verdict_quadrant"] = QUADRANT[(env == "SAME_ENV", s >= threshold)]
         stats[r["verdict_quadrant"]] += 1
 
+        # The resolved pair: BORDERLINE forced to DIFFERENT_ENV so downstream
+        # has no unresolved rows. Justified by measurement, not convenience --
+        # inside the band the human labels ran 7 same against 70 different, so
+        # calling the whole band DIFFERENT is right 90.9% of the time, and the
+        # band is 2.9% of pairs, i.e. ~0.26% of the corpus. Computed HERE, in
+        # the same pass as verdict_quadrant, because when these were bolted on
+        # by a separate script a threshold change updated one column and left
+        # the other silently stale.
+        r["verdict_resolved"] = "DIFFERENT_ENV" if env == "BORDERLINE" else env
+        if not ok:
+            r["verdict_quadrant_resolved"] = "NO_TASK_DATA"
+        elif not env:
+            r["verdict_quadrant_resolved"] = ""
+        else:
+            r["verdict_quadrant_resolved"] = QUADRANT[
+                (r["verdict_resolved"] == "SAME_ENV", s >= threshold)]
+        resolved[r["verdict_quadrant_resolved"]] += 1
+
     fields = list(rows[0].keys())
     with open(path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)
     return threshold, {"auc_canon": a, "fit": fit, "n": len(rows),
-                       "n_covered": len(have), "quadrant": stats}
+                       "n_covered": len(have), "quadrant": stats,
+                       "resolved": resolved}
 
 
 def main() -> int:
@@ -237,7 +261,16 @@ def main() -> int:
     ap.add_argument("csvs", nargs="+", help="pair CSVs to annotate in place")
     ap.add_argument("--threshold", type=float, default=None,
                     help="task_sim cut; default fits best-F1 on canon_task")
+    ap.add_argument("--s3", default=S3_TASK1_PREFIX,
+                    help="upload the annotated CSVs here; '' to skip. This is "
+                         "the LAST stage of task1, so it owns the upload -- "
+                         "match_env.py's output is not yet complete, and "
+                         "uploading there would publish a CSV with no task axis")
+    ap.add_argument("--no-upload", action="store_true",
+                    help="annotate locally only")
     args = ap.parse_args()
+    if args.s3 and not args.no_upload:
+        check_s3_destination(args.s3)
 
     tp = TaskProfiles()
     print(f"{tp.n_docs} task descriptions, {len(tp.idf)} distinct stems")
@@ -255,8 +288,34 @@ def main() -> int:
             print(f"  threshold {thr:.4f} fitted best-F1 on {f['n_pos']} canonical-task "
                   f"positives: F1={f['f1']:.3f} precision={f['precision']:.3f} "
                   f"recall={f['recall']:.3f}")
+        print("  verdict_quadrant (BORDERLINE kept as the honest flag):")
         for k, n in sorted(st["quadrant"].items(), key=lambda kv: -kv[1]):
-            print(f"    {k:<22} {n:>6}  ({n / st['n']:5.1%})")
+            print(f"    {k:<26} {n:>6}  ({n / st['n']:5.1%})")
+        print("  verdict_quadrant_resolved (no unresolved rows -- use this):")
+        for k, n in sorted(st["resolved"].items(), key=lambda kv: -kv[1]):
+            print(f"    {k:<26} {n:>6}  ({n / st['n']:5.1%})")
+
+    # The pair CSVs are gitignored -- S3 is the canonical copy, so an upload
+    # that is left to a human to remember is an upload that eventually does not
+    # happen. Verified by size rather than assumed: a silent short PUT here
+    # would leave a truncated authoritative file, which is the failure mode
+    # this project has already been bitten by twice (WORK.md section 7).
+    if args.s3 and not args.no_upload:
+        print()
+        for path in args.csvs:
+            dst = f"{args.s3}/{os.path.basename(path)}"
+            subprocess.run(["aws", "s3", "cp", path, dst, "--only-show-errors"],
+                           check=True)
+            got = subprocess.run(
+                ["aws", "s3api", "head-object", "--bucket", args.s3.split("/")[2],
+                 "--key", dst.split(args.s3.split("/")[2] + "/", 1)[1],
+                 "--query", "ContentLength", "--output", "text"],
+                capture_output=True, text=True, check=True).stdout.strip()
+            local = os.path.getsize(path)
+            state = "ok" if got == str(local) else f"SIZE MISMATCH (s3={got})"
+            print(f"  {dst}  {local} bytes  {state}")
+            if state != "ok":
+                return 1
     return 0
 
 

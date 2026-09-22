@@ -23,7 +23,7 @@ repeat across sessions, so a bare basename identifies two different clips.
 
 Usage:  python scripts/report_csv.py --index .novelty-2sess --out output
         python scripts/report_csv.py --index .novelty-2sess \
-            --out s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result
+            --s3 s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result_v2/task2_within_video
 """
 from __future__ import annotations
 
@@ -50,6 +50,19 @@ _STAGE = "s3://stage-humyn-egocentric-stereo-data/labelling_results"
 #: is kept so its results stay comparable rather than overwritten.
 S3_RESULT_PREFIX = f"{_STAGE}/novelty_result_v2"
 S3_DATA_PREFIX = f"{_STAGE}/novelty_data_v2"
+
+#: The two tasks write to SEPARATE subprefixes. They used to share
+#: novelty_result_v2/ root, which put `env_pairs.csv` (one row per pair of two
+#: DIFFERENT videos) next to `<episode>.csv` (one row per pair of chunks WITHIN
+#: one video). Those answer different questions and are read by different
+#: consumers, and a flat listing gave no way to tell which was which -- a
+#: reader who mistook one for the other would silently compute nonsense.
+#:
+#:   task1  similarity between two different videos     -> env_pairs*.csv
+#:   task2  repetition within one video, across chunks  -> one CSV per episode
+S3_TASK1_PREFIX = f"{S3_RESULT_PREFIX}/task1_video_pairs"
+S3_TASK2_PREFIX = f"{S3_RESULT_PREFIX}/task2_within_video"
+
 S3_WRITE_ALLOWLIST = (
     S3_RESULT_PREFIX, S3_DATA_PREFIX,
     f"{_STAGE}/novelty_result", f"{_STAGE}/novelty_data",   # v1, still writable
@@ -113,8 +126,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--index", default=".novelty-2sess")
     ap.add_argument("--out", default="output", help="local directory (kept)")
-    ap.add_argument("--s3", default=S3_RESULT_PREFIX,
-                    help="also mirror to this S3 prefix; '' to skip")
+    ap.add_argument("--s3", default=S3_TASK2_PREFIX,
+                    help="also mirror to this S3 prefix; '' to skip. Defaults to "
+                         "the task2 subprefix -- this script emits per-episode "
+                         "within-video CSVs, which is task2")
     ap.add_argument("--budget", type=int, default=None)
     args = ap.parse_args()
 

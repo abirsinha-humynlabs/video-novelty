@@ -38,7 +38,27 @@ NO_TASK_DATA             71    0.5%
 ```
 
 `s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result_v2/`
-— **this prefix is the canonical copy, not git.** `README.md` there documents
+**`task1_video_pairs/`** — the two tasks now write to separate subprefixes:
+
+```
+novelty_result_v2/
+  task1_video_pairs/     env_pairs*.csv + eyeball/ + README.md   116 objects
+  task2_within_video/    one CSV per episode + README.md           5 objects
+```
+
+They shared the root until 2026-09-22, which put `env_pairs.csv` (one row =
+a pair of two DIFFERENT videos) beside `<episode>.csv` (one row = a pair of
+chunks WITHIN one video). A flat listing gave no way to tell them apart, and
+reading one as the other computes nonsense silently. Each prefix now carries
+its own `README.md` saying which task it is, which column to read and how to
+regenerate.
+
+`scripts/report_csv.py` defines both destinations (`S3_TASK1_PREFIX`,
+`S3_TASK2_PREFIX`) and they are the defaults: `run_v2.py` and `report_csv.py`
+write task2, `task_axis.py` writes task1 and verifies each object's size after
+the PUT. No task destination lives only in someone's shell history.
+
+**this prefix is the canonical copy, not git.** `README.md` there documents
 every file, which column to read, how both thresholds were set and how to
 regenerate; start with it. `env_pairs.csv` (site-blocked),
 `env_pairs_by_industry.csv` (industry-blocked), `eyeball/` (all 138 labels —
@@ -142,14 +162,21 @@ Resolved quadrant over the 13964 same-site pairs:
 
 ```
 DISTINCT              10592   75.9%
-SAME_PLACE_NEW_TASK    2087   14.9%   keep
-REDUNDANT              1065    7.6%   the actionable set
+SAME_PLACE_NEW_TASK    2088   15.0%   keep
+REDUNDANT              1064    7.6%   the actionable set
 SAME_TASK_NEW_PLACE     149    1.1%   keep
 NO_TASK_DATA             71    0.5%
 ```
 
 **No unresolved rows.** Use `verdict_quadrant_resolved` downstream and
 `verdict_quadrant` when you need to know where the model was unsure.
+
+Both resolved columns are computed by `scripts/task_axis.py` in the SAME pass
+as `verdict_quadrant`. They were first produced by a separate ad-hoc script,
+which was a latent bug: a threshold change updated one column and left the
+other stale, and that script compared the *rounded* `task_sim` string, putting
+one boundary pair in REDUNDANT rather than SAME_PLACE_NEW_TASK. The figures
+above are the full-precision single-pass ones.
 
 ### Held out, and still holding
 
