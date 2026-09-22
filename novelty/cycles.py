@@ -434,8 +434,16 @@ def segment_by_cycles(an: CycleAnalysis, n_cycles: int = 6) -> List[Segment]:
     out: List[Segment] = []
     for run in _runs(an.boundaries, an.period_s):
         for i in range(0, len(run) - n_cycles, n_cycles):
-            out.append(Segment(float(run[i]), float(run[i + n_cycles]),
-                               "cadenced", n_cycles, an.period_s))
+            t0, t1 = float(run[i]), float(run[i + n_cycles])
+            # The segment's OWN period, from its own boundaries -- not the
+            # clip-wide median. The boundaries already adapt to a worker
+            # speeding up, slowing down or adding a sub-step, so the spans of
+            # equal-cycle segments genuinely differ (measured on one clip:
+            # 2.97 s to 4.60 s for the same 6 cycles, a 1.55x spread). Stamping
+            # the global median on every segment threw that away and reported a
+            # constant cadence for a clip that plainly did not have one.
+            out.append(Segment(t0, t1, "cadenced", n_cycles,
+                               (t1 - t0) / max(n_cycles, 1)))
     return out
 
 
@@ -455,7 +463,9 @@ def segment_by_duration(an: CycleAnalysis, target_s: float = 10.0) -> List[Segme
             # take whichever of the two straddling boundaries lands closer
             if j > i + 1 and abs(run[j - 1] - run[i] - target_s) < abs(run[j] - run[i] - target_s):
                 j -= 1
-            out.append(Segment(float(run[i]), float(run[j]), "cadenced", j - i, an.period_s))
+            t0, t1 = float(run[i]), float(run[j])
+            # its own period, as in segment_by_cycles
+            out.append(Segment(t0, t1, "cadenced", j - i, (t1 - t0) / max(j - i, 1)))
             i = j
     return out
 
