@@ -85,6 +85,11 @@ class CycleAnalysis:
     #: problem, not evidence that the work is irregular.
     trackable_fraction: float = 0.0
     segments: List[Segment] = field(default_factory=list)
+    #: which hand the analysis actually used. Never assume it: the working hand
+    #: differs by operator and by task, and the OTHER hand may simply be better
+    #: tracked. Measured across four episodes the better-tracked hand was LEFT
+    #: twice and RIGHT twice, with coverage gaps as wide as 0.31 vs 0.75.
+    hand: int = RIGHT
 
 
 # ---------------------------------------------------------------- loading
@@ -395,7 +400,7 @@ def estimate_period(tracks: HandTracks, *, hand: int = RIGHT,
     return med, float(np.average([s for _, s, _ in cands], weights=[n for _, _, n in cands]))
 
 
-def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45,
+def analyse(tracks: HandTracks, *, hand: Optional[int] = None, min_strength: float = 0.45,
             probe_step_s: Optional[float] = None, period_hint: Optional[float] = None,
             search_factor: float = 2.5) -> CycleAnalysis:
     """Locate cycle boundaries and measure how much of the clip is cadenced.
@@ -406,6 +411,31 @@ def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45
     assembly without retuning.
     """
     fps, n = tracks.fps, tracks.n_frames
+
+    # No hand given: analyse BOTH and keep whichever yields more cadenced
+    # footage. Defaulting to the right hand was an assumption about the worker,
+    # and on Polymer_Bags session5/001/seg_000 it was simply wrong -- the right
+    # wrist is tracked 76% of the time against the left's 97%, which after the
+    # run-length rule left 55% of the clip analysable instead of 96%, and 7
+    # chunks instead of 10. Running both costs one extra pass over a signal that
+    # is already in memory.
+    if hand is None:
+        best = None
+        for h in (LEFT, RIGHT):
+            if tracks.coverage.get(h, 0.0) <= 0.0:
+                continue
+            cand = analyse(tracks, hand=h, min_strength=min_strength,
+                           probe_step_s=probe_step_s, period_hint=period_hint,
+                           search_factor=search_factor)
+            key = (cand.cadence_fraction, cand.trackable_fraction)
+            if best is None or key > best[0]:
+                best = (key, cand)
+        if best is None:
+            return CycleAnalysis(fps=fps, duration_s=n / fps, period_s=0.0,
+                                 boundaries=np.zeros(0), cadence_fraction=0.0,
+                                 trackable_fraction=0.0)
+        return best[1]
+
     P = period_hint if period_hint else estimate_period(tracks, hand=hand)[0]
     if P <= 0:
         return CycleAnalysis(fps=fps, duration_s=n / fps, period_s=0.0,
@@ -415,7 +445,8 @@ def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45
     sig = cadence_signal(tracks, hand, baseline_s=3.0 * P)
     if sig is None:
         return CycleAnalysis(fps=fps, duration_s=n / fps, period_s=0.0,
-                             boundaries=np.zeros(0), cadence_fraction=0.0)
+                             boundaries=np.zeros(0), cadence_fraction=0.0,
+                             hand=hand)
 
     # Only stretches where the hands were ACTUALLY tracked can be analysed.
     # Everything outside them is unknown, not un-cadenced.
@@ -424,7 +455,7 @@ def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45
     if not runs:
         return CycleAnalysis(fps=fps, duration_s=n / fps, period_s=0.0,
                              boundaries=np.zeros(0), cadence_fraction=0.0,
-                             trackable_fraction=trackable)
+                             trackable_fraction=trackable, hand=hand)
 
     # Probe every half cycle, not every fixed 0.5 s: at a 0.2 s cycle a fixed
     # stride steps over 2.5 repetitions at a time, and at a 30 s cycle it probes
@@ -463,7 +494,7 @@ def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45
         fps=fps, duration_s=n / fps, period_s=per,
         boundaries=np.asarray(kept_t, float),
         cadence_fraction=float(cadenced_frames / n) if n else 0.0,
-        trackable_fraction=trackable,
+        trackable_fraction=trackable, hand=hand,
     )
 
 
