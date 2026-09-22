@@ -129,8 +129,20 @@ claude ver:  2.1.278
 On the old machine:
 
 ```bash
-tar -czf ~/claude-session.tar.gz -C ~/.claude/projects -home-ec2-user-projects-abir-video-novelty
+tar -czf ~/claude-session.tar.gz -C ~/.claude/projects ./-home-ec2-user-projects-abir-video-novelty
 ```
+
+The `./` is required, not cosmetic: the directory name begins with a dash, so
+without it `tar` reads it as options and fails with `invalid option -- 'e'`.
+
+Result: ~5.4 MB, and it carries the memory files and `MEMORY.md` as well as the
+transcript.
+
+**Move it directly (scp/rsync), not through S3.** The transcript contains a
+presigned S3 URL that was pasted into the conversation — a live credential
+until it expires — plus access-key IDs from other pasted links. That is fine in
+a home directory and on a laptop; it is not something to leave sitting in an
+object store. Delete the tarball once the new machine has it.
 
 On the new machine, with the repo cloned to the *same* path:
 
