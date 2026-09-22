@@ -79,10 +79,13 @@ N_CYCLES = 6
 #: yielding nothing, so "no chunks" is never confused with "no cadence".
 MAX_STEP = 1
 
-#: Profile used ONLY for reads from the prod bucket. Writes deliberately keep
-#: using the default (instance-role) credentials: an SSO identity is typically
-#: far broader than this box needs, and no write path should run through it.
+#: Profile used for reads from the prod bucket.
 READ_PROFILE = os.environ.get("NOVELTY_PROD_PROFILE", "")
+#: Profile for WRITING to stage. Which credential can write stage differs by
+#: machine -- the original GPU box could do it with its instance role, the
+#: devbox cannot and needs an SSO profile -- so it is configurable rather than
+#: implicit, and an empty value means "use the default credentials".
+WRITE_PROFILE = os.environ.get("NOVELTY_STAGE_PROFILE", "")
 
 
 def sh(cmd, profile=None, **kw):
@@ -156,13 +159,15 @@ def phase_a(args):
             continue
         try:
             tr = C.load_tracks(kp, rec["head"])
-            hand = C.RIGHT if tr.coverage[C.RIGHT] >= tr.coverage[C.LEFT] else C.LEFT
-            P, _strength = C.estimate_period(tr, hand=hand)
-            an = C.analyse(tr, hand=hand, period_hint=P if P > 0 else None)
+            # Let analyse pick the hand: it tries both and keeps whichever
+            # yields more cadenced footage. Choosing here on coverage alone was
+            # close but not the same thing, and passing a period_hint computed
+            # for the pre-chosen hand would have pinned the answer to it.
+            an = C.analyse(tr)
             segs = C.segment_by_cycles(an, n_cycles=N_CYCLES)
             rec.update(
                 duration_s=round(an.duration_s, 2), fps=tr.fps,
-                hand="RIGHT" if hand == C.RIGHT else "LEFT",
+                hand="RIGHT" if an.hand == C.RIGHT else "LEFT",
                 has_head=rec["head"] is not None,
                 coverage_l=round(tr.coverage[C.LEFT], 3),
                 coverage_r=round(tr.coverage[C.RIGHT], 3),
@@ -170,7 +175,12 @@ def phase_a(args):
                 trackable=round(an.trackable_fraction, 3),
                 cadence=round(an.cadence_fraction, 3),
                 n_boundaries=len(an.boundaries),
-                segments=[[round(s.t0, 3), round(s.t1, 3), s.n_cycles] for s in segs],
+                # each segment carries its OWN period, not the clip median: the
+                # operator speeds up, slows down and adds sub-steps, so a
+                # constant figure here is what made a 6-cycle chunk read as a
+                # 6-second cycle in the output.
+                segments=[[round(s.t0, 3), round(s.t1, 3), s.n_cycles,
+                           round(s.period_s, 3)] for s in segs],
             )
         except Exception as exc:                                   # noqa: BLE001
             rec.update(error=repr(exc)[:200], segments=[])
@@ -254,8 +264,15 @@ def embed_episode(rec, sigdir, upload=True):
         sh(["aws", "s3", "cp", vid, src, "--only-show-errors"], profile=vprofile)
         cdir = os.path.join(work, "chunks")
         os.makedirs(cdir)
-        for i, (a, b, ncyc) in enumerate(segs, 1):
-            nm = f"chunk{i:03d}_{a:.2f}-{b:.2f}_{ncyc}cyc.mp4"
+        for i, seg in enumerate(segs, 1):
+            a, b, ncyc = seg[0], seg[1], seg[2]
+            # The period goes in the NAME. A chunk's span is n_cycles x the
+            # period, so 6 cycles of a 1.3 s cycle is ~8 s -- and with only the
+            # span in the filename that reads as an 8 s cycle, which is exactly
+            # how the shipped CSVs were misread. Carrying both is self-explaining.
+            per = seg[3] if len(seg) > 3 else 0.0
+            nm = (f"chunk{i:03d}_{a:.2f}-{b:.2f}_{ncyc}cyc"
+                  f"{f'_{per:.2f}s' if per else ''}.mp4")
             sh(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
                 "-ss", f"{a:.3f}", "-i", src, "-t", f"{b-a:.3f}",
                 "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
@@ -264,7 +281,7 @@ def embed_episode(rec, sigdir, upload=True):
 
         if upload:
             sh(["aws", "s3", "sync", cdir, f"{S3_DATA_PREFIX}/{name}/chunks",
-                "--only-show-errors"])
+                "--only-show-errors"], profile=WRITE_PROFILE or None)
 
         # appearance only: the task axis is switched off, so V-JEPA2 and the flow
         # tier are 64% of the cost for zero effect on any decision.
@@ -361,7 +378,8 @@ def phase_c(args):
     # task2 subprefix, not the novelty_result_v2 root: these are per-episode
     # within-video CSVs and must not land beside task1's whole-video pair files.
     check_s3_destination(S3_TASK2_PREFIX)
-    sh(["aws", "s3", "sync", outdir, S3_TASK2_PREFIX, "--only-show-errors"])
+    sh(["aws", "s3", "sync", outdir, S3_TASK2_PREFIX, "--only-show-errors"],
+       profile=WRITE_PROFILE or None)
     print(f"  wrote {len(per_ep)} CSVs -> {S3_TASK2_PREFIX}")
     return 0
 
