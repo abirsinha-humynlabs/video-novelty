@@ -56,3 +56,10 @@ Copy of *.csv
 # history, where they cannot be removed by deleting the file later.
 Copy of *.xlsx
 *.xlsx
+
+# Session archives and handoff bundles. The session archive carries a presigned
+# S3 URL pasted into the conversation -- a live credential until it expires --
+# so it must never reach git history.
+*.tar.gz
+*.tgz
+claude-session.*
