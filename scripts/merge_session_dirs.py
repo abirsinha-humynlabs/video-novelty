@@ -70,12 +70,20 @@ def read_lines(path: str) -> List[str]:
 
 
 def key_of(line: str) -> Tuple[str, str]:
-    """(uuid, timestamp) for dedup and ordering; falls back to the raw line."""
+    """(identity, timestamp) for dedup and ordering.
+
+    Roughly a third of the lines in a real transcript carry no `uuid` at all
+    (`type: mode`, `last-prompt`, attachments and other metadata), so the
+    fallback has to identify them. It is the WHOLE line, not a prefix: measured
+    on a 5,780-line transcript, 33 distinct lines shared their first 200
+    characters and differed only later, so a truncated key drops real entries
+    while reporting them as already present.
+    """
     try:
         d = json.loads(line)
     except Exception:                                              # noqa: BLE001
-        return (line[:200], "")
-    return (str(d.get("uuid") or line[:200]), str(d.get("timestamp") or ""))
+        return (line, "")
+    return (str(d.get("uuid") or line), str(d.get("timestamp") or ""))
 
 
 def newest_mtime(root: str) -> float:
