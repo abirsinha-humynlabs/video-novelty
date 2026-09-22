@@ -38,8 +38,18 @@ NO_TASK_DATA             71    0.5%
 ```
 
 `s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result_v2/`
-— `env_pairs.csv` (site-blocked), `env_pairs_by_industry.csv` (industry-blocked),
-`eyeball/` (every human label, the contact sheets, the negative-result scores).
+— **this prefix is the canonical copy, not git.** `README.md` there documents
+every file, which column to read, how both thresholds were set and how to
+regenerate; start with it. `env_pairs.csv` (site-blocked),
+`env_pairs_by_industry.csv` (industry-blocked), `eyeball/` (all 138 labels —
+`human_labels_all_with_pairs.csv` carries the episode uuids so any label can be
+traced back to its pair — plus the contact sheets, round-2/3 tiles and the
+negative-result scores). 121 objects, verified byte-identical to local.
+
+The pair CSVs are deliberately **not** in git: they carry columns derived from
+the gitignored customer QA export, and every threshold change rewrote all
+13,964 rows, so a one-line decision produced a 37,000-line diff. Code and
+thresholds are versioned; results are not.
 
 Columns: `env_cos env_chamfer env_bhat_sim env_raw env_percentile_vs_negatives
 verdict verdict_calibrated env_threshold task_sim task_threshold
