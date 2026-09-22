@@ -161,6 +161,28 @@ def _to_world(pose: np.ndarray, T: np.ndarray) -> np.ndarray:
 #: to express.
 MAX_GAP_SAMPLES = 3
 
+#: Samples needed per cycle before a period is measurable at all. This replaces
+#: what used to be a hardcoded 0.4 s search floor -- an absolute time is an
+#: assumption about the WORK, and the cycle rate changes with every video and
+#: within one. Samples-per-cycle is an assumption about the SIGNAL, which is
+#: the thing that is actually fixed: below ~4 samples a cycle cannot be
+#: distinguished from noise at any frame rate. The floor is therefore
+#: MIN_SAMPLES_PER_CYCLE / fps -- 0.13 s at 30 fps, 1.33 s at 3 fps -- so the
+#: same code adapts instead of hiding fast work.
+MIN_SAMPLES_PER_CYCLE = 4.0
+
+
+def period_floor(fps: float) -> float:
+    """Shortest cycle this frame rate can support, in seconds."""
+    return MIN_SAMPLES_PER_CYCLE / max(fps, 1e-6)
+
+#: A peak this close to the tallest one counts as the same evidence, so the
+#: SHORTEST such lag wins and the estimator returns the fundamental rather than
+#: whichever harmonic happens to be tallest. See local_period for the measured
+#: case this fixes. Stable anywhere in 0.60-0.90 on the three real episodes
+#: tested, so it is a plateau rather than a tuned value.
+HARMONIC_FRAC = 0.80
+
 
 def _fill(x: np.ndarray, fps: float = 30.0, max_gap_s: float = 0.3
           ) -> Optional[np.ndarray]:
@@ -204,7 +226,13 @@ def valid_runs(x: np.ndarray, fps: float, min_run_s: float = 6.0
     return [(int(a), int(b)) for a, b in zip(on, off) if b - a >= need]
 
 
-def _smooth(x: np.ndarray, fps: float, win_s: float = 0.25) -> np.ndarray:
+def _smooth(x: np.ndarray, fps: float, win_s: Optional[float] = None) -> np.ndarray:
+    """Hanning smooth. The window defaults to HALF the shortest detectable
+    cycle, never a fixed 0.25 s: a 0.25 s window attenuates a 0.4 s cycle badly,
+    so the old default quietly suppressed exactly the fast work this module is
+    meant to find."""
+    if win_s is None:
+        win_s = period_floor(fps) / 2.0
     w = max(int(win_s * fps), 3)
     k = np.hanning(w)
     return np.convolve(x, k / k.sum(), mode="same")
@@ -269,7 +297,7 @@ def cadence_signal(tracks: HandTracks, hand: int = RIGHT,
 
 
 def local_period(x: np.ndarray, fps: float, centre: int, window_s: float,
-                 lo_s: float = 0.4, hi_s: Optional[float] = None
+                 lo_s: Optional[float] = None, hi_s: Optional[float] = None
                  ) -> Tuple[float, float]:
     """Dominant period and autocorrelation strength in a window around ``centre``.
 
@@ -280,6 +308,7 @@ def local_period(x: np.ndarray, fps: float, centre: int, window_s: float,
     ~1.2 s structurally invisible.
     """
     W = int(window_s * fps)
+    lo_s = period_floor(fps) if lo_s is None else lo_s
     ceiling = window_s / MIN_REPS
     hi_s = ceiling if hi_s is None else min(hi_s, ceiling)
     seg = x[max(0, centre - W // 2): centre + W // 2]
@@ -300,13 +329,32 @@ def local_period(x: np.ndarray, fps: float, centre: int, window_s: float,
     pk = np.nonzero((inner > s[:-2]) & (inner >= s[2:]))[0]
     if len(pk) == 0:
         return 0.0, 0.0
-    k = int(pk[int(np.argmax(inner[pk]))]) + 1
+    # Take the FUNDAMENTAL, not the tallest peak. A repeated motion puts peaks
+    # at P, 2P, 3P ... and which one is tallest is an accident of how even the
+    # repetitions are; a sub-step that recurs every third cycle (pick, polish,
+    # clean, release) lifts 3P above P. Measured on a real polythene-bagging
+    # episode the peaks ran 1.27 s (0.281), 2.63 s (0.263), 3.90 s (0.308) --
+    # argmax returned 3.90 s for a cycle the operator performs in about a
+    # second, and six of those chunked to an 11 s "cycle" in the output.
+    #
+    # So: among the peaks, take the SHORTEST lag that is still within
+    # HARMONIC_FRAC of the tallest. On three real episodes the choice is stable
+    # anywhere in 0.60-0.90, which is why 0.80 is safe rather than tuned.
+    vals = inner[pk]
+    best = float(vals.max())
+    # Scaling by a fraction only means "nearly as tall" for a POSITIVE peak.
+    # When every peak is negative -- an un-cadenced window, where the answer is
+    # discarded on strength anyway -- `frac * best` is larger than `best` and
+    # selects nothing, so fall back to the tallest and let the strength gate
+    # reject it.
+    thresh = HARMONIC_FRAC * best if best > 0 else best
+    k = int(pk[vals >= thresh].min()) + 1
     return float((lo + k) / fps), float(np.clip(s[k], 0.0, 1.0))
 
 
 # ---------------------------------------------------------------- analysis
 def estimate_period(tracks: HandTracks, *, hand: int = RIGHT,
-                    lo_s: float = 0.4, hi_s: float = 60.0
+                    lo_s: Optional[float] = None, hi_s: float = 60.0
                     ) -> Tuple[float, float]:
     """Coarse period over the longest tracked runs, searching a wide range.
 
@@ -320,6 +368,7 @@ def estimate_period(tracks: HandTracks, *, hand: int = RIGHT,
     Returns ``(period_s, strength)``, or ``(0, 0)`` if nothing qualifies.
     """
     fps = tracks.fps
+    lo_s = period_floor(fps) if lo_s is None else lo_s
     sig = cadence_signal(tracks, hand, baseline_s=None)
     if sig is None:
         return 0.0, 0.0
@@ -347,7 +396,7 @@ def estimate_period(tracks: HandTracks, *, hand: int = RIGHT,
 
 
 def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45,
-            probe_step_s: float = 0.5, period_hint: Optional[float] = None,
+            probe_step_s: Optional[float] = None, period_hint: Optional[float] = None,
             search_factor: float = 2.5) -> CycleAnalysis:
     """Locate cycle boundaries and measure how much of the clip is cadenced.
 
@@ -377,7 +426,10 @@ def analyse(tracks: HandTracks, *, hand: int = RIGHT, min_strength: float = 0.45
                              boundaries=np.zeros(0), cadence_fraction=0.0,
                              trackable_fraction=trackable)
 
-    step = max(int(probe_step_s * fps), 1)
+    # Probe every half cycle, not every fixed 0.5 s: at a 0.2 s cycle a fixed
+    # stride steps over 2.5 repetitions at a time, and at a 30 s cycle it probes
+    # 60 times inside one.
+    step = max(int((probe_step_s if probe_step_s else P / 2.0) * fps), 1)
     keep: List[int] = []
     per_all, cadenced_frames = [], 0
     for a, b in runs:
