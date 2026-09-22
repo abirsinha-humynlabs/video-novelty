@@ -156,8 +156,31 @@ claude --resume 65787d15-db72-45ee-9584-48d002d3ef19
 `claude --resume` with no id lists the sessions for the current directory;
 `claude --continue` picks up the most recent one.
 
-If the repo must live at a different path, rename the directory under
-`~/.claude/projects/` to match the new path in the same `/` to `-` form.
+### If the repo lives at a different path (this happened)
+
+The resume machine cloned to `/home/ec2-user/projects/video-novelty`, not
+`projects_abir/`. The session still resumed and kept writing to the OLD
+directory, while the new path mapped to a fresh empty one — so memory and past
+transcripts were invisible from the new working directory, and any new memory
+would have been written somewhere the old name could not see.
+
+**Do not copy the directory** — the live session keeps writing to the old one,
+so the copy starts drifting immediately. Point the new name at the old store:
+
+```bash
+cd ~/.claude/projects
+rmdir ./-home-ec2-user-projects-video-novelty/memory \
+      ./-home-ec2-user-projects-video-novelty          # rmdir: refuses if not empty
+ln -s ./-home-ec2-user-projects-abir-video-novelty \
+      ./-home-ec2-user-projects-video-novelty
+```
+
+`rmdir` rather than `rm -rf` on purpose: it fails rather than deleting if that
+directory turned out to hold anything. Verify writes pass through, not just
+reads — write a probe file via the new name and check it appears under the old.
+
+The alternative is to clone at the original path instead, which needs no
+symlink. Either is fine; having two real directories is not.
 
 ### What resuming does and does not restore
 
