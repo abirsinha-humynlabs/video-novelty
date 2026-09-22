@@ -163,10 +163,11 @@ that it waits on VLM captioning of the 766. **Both were wrong, and the data to
 settle it was already in the repo.**
 
 `rejected_repetitive_shorter_segment.csv` carries, per episode, a
-`task_description (our)` sentence of exactly the shape the VLM would produce
-("The person is selecting plant cuttings from a pile and carefully inserting
-them into the soil plugs of a seedling tray"), plus a 12-way `job_family` and a
-`canon_task×site_h`. Coverage on the pair set is **13893/13964 — 99.5%**.
+`task_description (our)` sentence of exactly the shape the VLM would produce —
+one clause naming the action, the object and the fixture it is done on — plus a
+12-way `job_family` and a `canon_task×site_h`. Coverage on the pair set is
+**13893/13964 — 99.5%**. (No description is quoted here: they are customer
+data, and this file is committed.)
 
 `scripts/task_axis.py` builds IDF-weighted stem profiles from it (IDF is not
 optional — see `novelty.captions.fit_idf`; the generic stems here are

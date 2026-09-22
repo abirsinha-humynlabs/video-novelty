@@ -31,6 +31,15 @@ data/
 # CSV results -- these live on S3 now (see WORK.md section 9), local is staging
 output/
 old_output/
+# The pair CSVs obey that same rule, and untracking them fixed two things at
+# once: they carry columns derived from the gitignored customer QA export
+# (job_a/job_b, same_canon_task), and every threshold change rewrote all 13964
+# rows, so a one-line decision produced a 37000-line diff. Canonical copies:
+#   s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result_v2/
+# Regenerate with scripts/match_env.py then scripts/task_axis.py (WORK.md §000).
+env_pairs.csv
+env_pairs_by_industry.csv
+eval/exp_local_place_scores.json
 
 # Customer QA exports. Deliberately NOT committed: they carry per-episode
 # customer data (episode_uuid, operator_id, city/state, task descriptions) and

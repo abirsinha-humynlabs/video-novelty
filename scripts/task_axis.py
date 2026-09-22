@@ -7,10 +7,10 @@ need to for this.
 
 `rejected_repetitive_shorter_segment.csv` carries, per episode, a
 `task_description (our)` sentence of exactly the shape the VLM would have
-produced ("The person is selecting plant cuttings from a pile and carefully
-inserting them into the soil plugs of a seedling tray"), plus a 12-way
-`job_family` and a `canon_task x site_h`. Coverage on the pair set is
-13893/13964 -- 99.5%.
+produced -- one clause naming the action, the object and the fixture it is done
+on -- plus a 12-way `job_family` and a `canon_task x site_h`. Coverage on the
+pair set is 13893/13964 -- 99.5%. (Not quoted: the descriptions are customer
+data and this file is committed.)
 
 WHY TEXT AND NOT PIXELS. Every pixel-based task attempt in this project
 failed, and failed the same way: flow rhythm at 0.11 sigma, and V-JEPA 2
