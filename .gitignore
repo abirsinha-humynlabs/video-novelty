@@ -40,3 +40,10 @@ old_output/
 rejected_episodes.csv
 rejected_repetitive_shorter_segment.csv
 Copy of *.csv
+# The xlsx is worse than the CSV exports: alongside the same per-episode
+# customer data, its hyperlink relationships hold 766 PRESIGNED S3 URLs. Those
+# carry AWS credentials for prod and work for anyone holding them, regardless
+# of IAM. Committing this file would put working prod credentials in git
+# history, where they cannot be removed by deleting the file later.
+Copy of *.xlsx
+*.xlsx
