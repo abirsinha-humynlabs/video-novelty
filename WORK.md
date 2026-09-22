@@ -4,14 +4,260 @@
 what was measured, what is broken, and what to do next. The `docs/` directory
 explains *how the code works*; this file explains *where the project is*.
 
-Last updated: 2026-09-21 · repo `abirsinha-humynlabs/video-novelty`
+Last updated: 2026-09-22 · repo `abirsinha-humynlabs/video-novelty`
 
-> **Read §00 (v2 — the current direction) first, then §0. The 2026-09-18 work
-> in §0 is still valid; v2 is built on top of it.**
+> **Read §000 first — task1 is delivered and it changed several conclusions in
+> this file. Then §00 (task2, parked), then §0. Everything older is still
+> valid unless §000 says otherwise.**
+>
+> The project splits into two tasks, and conflating them caused real confusion:
+>
+> | | question | status |
+> |---|---|---|
+> | **task1** | similarity between two *different* videos | **delivered 2026-09-22** (§000) |
+> | **task2** | repetition *within* one video, across its chunks | parked on 3 fps NPZ (§00) |
 
 ---
 
-## 00. v2 — cycle-aware chunking (2026-09-21, IN PROGRESS)
+## 000. task1 — video-to-video similarity. DELIVERED 2026-09-22.
+
+Read this before anything else. It supersedes §6's "task axis is blocked" and
+§8's P0.
+
+### What shipped
+
+Both axes, never fused, over all 13,964 same-site pairs of the 435 episodes:
+
+```
+DISTINCT              10206   73.1%
+SAME_PLACE_NEW_TASK    2088   15.0%   keep
+REDUNDANT              1064    7.6%   <- the actionable set
+BORDERLINE_ENV          401    2.9%   env axis cannot decide; see below
+SAME_TASK_NEW_PLACE     134    1.0%   keep
+NO_TASK_DATA             71    0.5%
+```
+
+`s3://stage-humyn-egocentric-stereo-data/labelling_results/novelty_result_v2/`
+— `env_pairs.csv` (site-blocked), `env_pairs_by_industry.csv` (industry-blocked),
+`eyeball/` (every human label, the contact sheets, the negative-result scores).
+
+Columns: `env_cos env_chamfer env_bhat_sim env_raw env_percentile_vs_negatives
+verdict verdict_calibrated env_threshold task_sim task_threshold
+same_job_family same_canon_task job_a job_b verdict_quadrant`. A row carries the
+provenance of its own decision — the original `verdict` sits beside the
+calibrated one.
+
+**1064 pairs are same place AND same job**, against the 2994 the environment
+axis alone called same-place. Most same-place pairs are the worker doing a
+*different* job in the same room, which is not redundant at all. Keeping the
+axes separate cut the redundancy candidate set by two thirds — that is the
+whole argument for the quadrant, now with a number attached.
+
+### The env threshold was calibrated twice, and the first one was wrong
+
+Worth reading as a method lesson, not just a changelog.
+
+**Round 1** — 40 pairs sampled across the whole score range, judged by the user
+in an artifact. Perfect separation, AUC 1.0000, so the threshold went to the
+midpoint of the gap: `env_raw >= 0.4673`.
+
+**That gap was an artifact of the sampling.** Almost nothing in round 1 sat
+inside it. **Round 2** sampled 48 pairs *only* from inside the band
+(0.4400–0.4947), 96 distinct clips with none reused, shown **blind** (scores
+hidden by default, so the model could not anchor the judgement) in randomised
+order:
+
+```
+same        3
+different  33
+unsure     12
+```
+
+The region round 1 could not see is overwhelmingly **not** the same place. On
+the combined 88 labels the 0.4673 cut scores **precision 0.485** — a coin flip.
+
+```
+AUC combined              0.9796   (was 1.0000 on round 1 alone)
+AUC inside the band       0.8182   still ordered, no longer separable
+separation                OVERLAPPING: max different 0.4919 > min same 0.4666
+best F1        0.9412 at >= 0.4901   precision 0.889  recall 0.941
+zero-FP cut          at >= 0.4920    recall 15/17 = 0.882
+```
+
+Operating point: **SAME_ENV at `env_raw >= 0.4920`**, BORDERLINE down to
+0.4666 (the overlap region, bounded below by the lowest human "same"), else
+DIFFERENT_ENV. Zero-FP was chosen over best-F1 because the costs are not
+symmetric: a false positive discards genuinely novel footage, a false negative
+only leaves a redundant clip in the set.
+
+**The lesson: calibrate on the region where the decision is hard, not on the
+range where it is easy.** A threshold fitted to easy pairs will look perfect
+and be wrong.
+
+### Held out, and still holding
+
+No round of labelling touched these strata. Sensitivity and specificity both
+survive the refit:
+
+```
+same_session_adjacent     n=   32   96.9% SAME_ENV
+same_session_distant      n=  180   95.6% SAME_ENV
+same_industry_diff_site   n= 9563    1.1% SAME_ENV
+```
+
+Pairs from one recording come out ~96% same-place; pairs from different sites
+in the same industry come out 98.9% not-same. Under a threshold refit entirely
+from same-site labels.
+
+### The task axis was never actually blocked
+
+§6 and §8-P0 say the task axis cannot be measured without new recordings, and
+that it waits on VLM captioning of the 766. **Both were wrong, and the data to
+settle it was already in the repo.**
+
+`rejected_repetitive_shorter_segment.csv` carries, per episode, a
+`task_description (our)` sentence of exactly the shape the VLM would produce
+("The person is selecting plant cuttings from a pile and carefully inserting
+them into the soil plugs of a seedling tray"), plus a 12-way `job_family` and a
+`canon_task×site_h`. Coverage on the pair set is **13893/13964 — 99.5%**.
+
+`scripts/task_axis.py` builds IDF-weighted stem profiles from it (IDF is not
+optional — see `novelty.captions.fit_idf`; the generic stems here are
+`plastic`, `metal`, `floor`, `pick`). Measured against `canon_task×site_h`:
+
+```
+same canonical task       n=  979   task_sim mean 0.5462
+different canonical task  n=12914   task_sim mean 0.0952
+AUC                                 0.9768
+best-F1 cut               0.3798    precision 0.676  recall 0.838
+```
+
+979 positives, against the env threshold's 17 human labels — this is now the
+**better-grounded of the two axes.** (Precision 0.676 is a floor, not an error
+rate: `canon_task×site_h` is task AND site, so the same job at two sites counts
+as a miss while being a true `SAME_TASK_NEW_PLACE`.)
+
+**It passes the independence test V-JEPA 2 failed.** That test has to hold the
+environment fixed, or it measures how the world correlates rather than how the
+axis behaves:
+
+| | corr with env axis |
+|---|---|
+| V-JEPA 2 task score, within one session | **+0.55** |
+| this text axis, within one session | **+0.243** |
+| this text axis, all same-site pairs | +0.607 |
+
+The +0.607 is not a defect — a pipe factory really does pipe work, so task and
+place genuinely co-vary in this corpus. The within-session number is the one
+that says whether the axis measures the job or the room.
+
+**Why text and not pixels, restated because it keeps getting re-proposed:**
+DINOv2 cannot do task. Its global token *is* scene appearance, which is
+precisely why it works as the environment axis. Two different jobs at the same
+bench are near-identical to it. Every pixel-based task attempt here failed the
+same way — flow rhythm at 0.11 σ, V-JEPA 2 at +0.55 within a session,
+VideoMAE likewise.
+
+### The 401 BORDERLINE pairs are genuinely ambiguous, not badly represented
+
+The obvious theory: the env axis pools each frame to one global DINOv2 vector,
+which is right for "same kind of scene" and wrong for "same physical place",
+where the evidence is a specific pillar or bench recurring. Tested it —
+`eval/exp_local_place_matching.py`, 126 clips, 8 frames each, three scorers:
+
+```
+                    band 3v33   session24 v band33   easy 6v6
+global                 0.5051            0.9533       1.0000
+patch                  0.7626            0.7607       0.5833
+patch_nobody           0.7626            0.7336       0.5000
+sift                   0.4040            0.6622       0.5417
+sift_nobody            0.4545            0.7077       0.6528
+
+production env_raw on band 3v33 = 0.8182
+```
+
+Patch matching's 0.7626 is not a result: three positives, and the same scorer
+gets **0.5833 on the easy pairs the global axis separates perfectly** while
+losing the well-powered session-vs-band test 0.7607 to 0.9533. SIFT+RANSAC is
+below chance on the band. Masking the wearer's body changed nothing.
+
+The match rates say why — fraction of candidate matches surviving RANSAC:
+
+```
+patch   same_session 0.00429   band same 0.00429   band different 0.00386
+sift    same_session 0.09500   band same 0.06667   band different 0.07333
+```
+
+Positives and hard negatives are indistinguishable, and the absolute values
+are a noise floor — 0.4% of patches surviving is RANSAC fitting an affine to
+four or five coincidental matches. Real correspondence appears in exactly one
+place: same-session SIFT (max 1.14, >100 inliers), two segments of **one
+recording**, where viewpoints genuinely overlap.
+
+Classical place recognition assumes overlapping views of rigid structure. Two
+visits to the same bench on different days, on a head-mounted camera, share
+almost no viewpoint. **So BORDERLINE is the correct verdict for those pairs,
+not a placeholder**, and only human judgement moves them.
+
+### One finding that cuts against the above, and matters more than the rest
+
+The `global` row there scored **0.5051** — chance — where production `env_raw`
+scores **0.8182** on the same pairs. The difference is that `global` is plain
+CLS chamfer: no corpus whitening, no static body mask, none of the cos/bhat
+terms.
+
+**Most of the env axis's power on hard pairs is the whitening, not raw DINOv2
+similarity.** Consistent with the 23× whitening effect in `docs/08`, but larger
+than anyone here had appreciated. Two consequences: the comparison above was
+*generous* to patch matching and it still lost; and if the env axis ever needs
+improving, whitening and calibration are where the leverage is, not the
+backbone.
+
+### task1 reproduction
+
+```bash
+# environment axis (embed then compare; presigned HTTP range reads, no bulk download)
+.venv/bin/python scripts/match_env.py embed   --manifest /tmp/manifest_435.json --out env_sigs
+.venv/bin/python scripts/match_env.py compare --sigs env_sigs --out env_pairs.csv
+
+# task axis + quadrant, in place on the pair CSVs
+.venv/bin/python scripts/task_axis.py env_pairs.csv env_pairs_by_industry.csv
+
+# the negative result, if anyone proposes local matching again
+.venv/bin/python eval/exp_local_place_frames.py && .venv/bin/python eval/exp_local_place_matching.py
+```
+
+`eval/human_labels_all.csv` holds all 88 judgements, so both operating points
+can be re-derived from raw labels rather than trusted.
+
+### What is left on task1
+
+- **401 BORDERLINE pairs (2.9%).** Label ~50 more (round 3 is built) to narrow
+  the band, or accept 2.9% unresolved. Nothing algorithmic will fix them.
+- **71 pairs have no task description** (`NO_TASK_DATA`) — 2 episodes missing
+  from the QA export.
+- One clip never embedded: `c9aaec51-2cd8-5145-8f22-46a31a35e733` (ffmpeg
+  timeout). 434 of 435.
+
+---
+
+## 00. task2 — cycle-aware chunking (2026-09-21, PARKED)
+
+> **Parked on frame rate, checked 2026-09-22.** `model_output/` now holds 522
+> episodes, newest write 2026-09-22 00:19 UTC — and `step`/`fps` read out of
+> the NPZ (not inferred from file size) are `step: 10, fps 30` on 22 of 24
+> sampled across the whole timeline, i.e. **3 fps effective, all of them**.
+> Files grew from 20 KB to ~1 MB, which looks like a rate change and is not:
+> longer episodes, more detected hands.
+>
+> A separate `model_output_fullrate/` prefix holds **8 episodes at `step: 1`**
+> (true 30 fps, 11–17 MB NPZ, written 2026-09-21 18:10). Only 3 of the 8 are in
+> the 435. So someone is already regenerating at full rate into a different
+> prefix — pointing that job at the 435 is the unblock; 432 to go.
+>
+> At 3 fps a 1-second grab-and-release is 3 samples, so the period estimate has
+> nothing to lock onto. **Do not run the cycle pipeline on step-10 data.**
+> Poll BOTH prefixes.
 
 **The project now has a commercial target with 435 labelled examples.** Customer
 QA rejected 766 episodes. 435 (57%) say *"Repetitive motion or repeated simple
@@ -531,7 +777,11 @@ exactly zero. 44% of that footage carries no information the rest doesn't.
 negative. AUC 0.998 over 630 pairs, ground truth from session membership. No
 further recordings needed for this axis.
 
-**Task axis: UNCHANGED. Still blocked. Still the most important thing.**
+**Task axis: NO LONGER BLOCKED for task1 — see §000.** The `task_description
+(our)` column in the QA export supplies a whole-video task descriptor for
+13893/13964 pairs, AUC 0.9768 against `canon_task×site_h`, within-session
+confound +0.243. Everything below is still true of the *pixel* task tier and
+of task2's within-video comparison, where the missing quadrant still bites.
 
 **[Certain] There is still no way to tell whether the task tier works, because
 no pair in the dataset differs on task while holding environment fixed.** Adding
@@ -685,11 +935,17 @@ camera. Worth knowing if you ever run this on rendered or looped content.
 
 ## 8. What to do next, ranked
 
-### P0 — unblock the TASK axis (no code, still)
-Unchanged and still first. Get the `SAME_PLACE_NEW_TASK` recordings described in
-§6 and label them. Two different jobs **in the same station, same worker, same
-lighting**. Everything about the task tier is unmeasurable until this exists,
-and the new session9 data did *not* supply it.
+### P0 — ~~unblock the TASK axis~~ **RETIRED 2026-09-22 (§000)**
+This asked for new `SAME_PLACE_NEW_TASK` recordings before the task tier could
+be measured. It was answered without them: the QA export's task descriptions
+gave a text task axis at AUC 0.9768, and the 88 human labels supplied the
+positives the eval set lacked. **The lesson is worth keeping — the data needed
+to unblock this had been sitting in a CSV in the repo the whole time.** Look
+there before asking for a new capture.
+
+The request still stands for the *pixel* task tier and for task2: a paired
+capture of two different jobs in the same station, same worker, same lighting
+is the only way to measure those. It is no longer on the critical path.
 
 ### P1 — run the GPU path — **DONE 2026-09-18**
 All four backbones execute on the A10G, fp16/bf16, L2-normed, no NaNs:
