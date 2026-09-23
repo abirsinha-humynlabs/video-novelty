@@ -26,10 +26,19 @@ of them by size would have given the same wrong answer as sampling none.
 A handful of episodes report odd source rates (29.97, 28.39, 26.68 fps) and two
 use `step: 9`; both still land at ~3 effective fps, so the rule is to divide and
 threshold, never to match on `step == 10`.
+
+Usage:
+    python scripts/census_hand_tracking.py
+    CENSUS_PREFIXES=model_output_30fps python scripts/census_hand_tracking.py
+"""
 import concurrent.futures as cf, json, os, subprocess, sys
 T = os.path.dirname(os.path.abspath(__file__))
 P = "s3://prod-egc-stereo-v2-data/work_items/hand_detection"
 PROF = ["--profile", "prod"]
+#: All hand-detection output prefixes. `model_output_30fps` was added
+#: 2026-09-22 and is still filling, so a census of it is a snapshot.
+PREFIXES = tuple(os.environ.get("CENSUS_PREFIXES",
+    "model_output,model_output_fullrate,model_output_30fps").split(","))
 
 def episodes(prefix):
     out = subprocess.run(["aws", "s3", "ls", f"{P}/{prefix}/"] + PROF,
@@ -61,7 +70,7 @@ def probe(item):
 
 os.makedirs(f"{T}/rep", exist_ok=True)
 work = []
-for pref in ("model_output", "model_output_fullrate"):
+for pref in PREFIXES:
     eps = episodes(pref)
     print(f"{pref}: {len(eps)} episodes", flush=True)
     work += [(pref, e) for e in eps]

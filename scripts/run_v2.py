@@ -52,9 +52,15 @@ STAGE_HAND = ("s3://stage-humyn-egocentric-stereo-data/labelling_results/hand_po
 #: while model_output_fullrate held 8. Polling only one silently loses episodes,
 #: so every cycle syncs both. They merge into one local tree keyed by episode
 #: name, so an episode present in both simply resolves to one entry.
+#: Every prefix the hand detector writes to. `model_output_30fps` was added
+#: 2026-09-22 and is the one actively filling; `model_output` is 766 episodes
+#: all at step 10 (3 fps) and is mirrored only so the step gate can reject them
+#: with a reason rather than silently seeing nothing. Missing a prefix here is
+#: invisible -- the drain simply never notices those episodes exist.
 PROD_NPZ_PREFIXES = (
     "s3://prod-egc-stereo-v2-data/work_items/hand_detection/model_output",
     "s3://prod-egc-stereo-v2-data/work_items/hand_detection/model_output_fullrate",
+    "s3://prod-egc-stereo-v2-data/work_items/hand_detection/model_output_30fps",
 )
 N_CYCLES = 6
 
