@@ -71,3 +71,9 @@ claude-session.*
 # delivery manifest, not source.
 delivered_*_master_list.csv
 pick_*h.csv
+
+# Manual-review joins (scripts/review_sheet.py): our run verdict next to every
+# column of the QA workbook, so they inherit the workbook's per-episode
+# customer data, and with --with-links they carry live presigned prod URLs.
+# Regenerate from the workbook; never commit.
+task2_review*.csv
