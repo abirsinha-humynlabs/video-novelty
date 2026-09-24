@@ -11,9 +11,14 @@ This writes one row per episode with the outcome and the reason it stopped,
 so the run is auditable without re-deriving anything:
 
     no_keypoints      upstream has not produced them yet
+    excluded          a reviewer looked at the chunks and rejected them; the
+                      reason is recorded in segments.json
     coarse_rate       keypoints exist but at step > 1 (3 fps); unusable
     untrackable       hands located too rarely to judge cadence
     no_cadence        tracked well enough, but no periodic signal found
+    not_recurrent     a cadence was found, but at its cut points the hand does
+                      not return to the same pose any better than at random
+                      cuts -- jitter, or a harmonic of the real cycle
     too_few_chunks    cadence found, but < 2 chunks so nothing to compare
     ok                >= 2 chunks, a CSV exists
 
@@ -39,12 +44,14 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+from novelty.cycles import RECURRENCE_ALPHA  # noqa: E402
 from scripts.report_csv import check_s3_destination  # noqa: E402
 
 #: Below this share of the clip the hands are located too rarely for the
 #: run-length rule to leave anything analysable. Measured, not chosen: every
 #: episode that has ever produced a chunk sits above it.
 TRACKABLE_FLOOR = 0.50
+
 
 
 def episode_key(path_or_name: str) -> str:
@@ -70,11 +77,18 @@ def episode_key(path_or_name: str) -> str:
 def classify(rec: dict) -> str:
     if rec is None:
         return "no_keypoints"
+    if rec.get("excluded"):
+        return "excluded"
     if (rec.get("step") or 99) > 1:
         return "coarse_rate"
     n = len(rec.get("segments") or [])
     if n >= 2:
         return "ok"
+    # tested and failed: the search found cuts, and the cuts did not recur.
+    # Checked before the chunk count, because a rejected candidate ships no
+    # chunks and would otherwise read as "no cadence".
+    if rec.get("recurrence") is not None and (rec.get("recurrence_p") or 1.0) > RECURRENCE_ALPHA:
+        return "not_recurrent"
     if n == 1:
         return "too_few_chunks"
     if (rec.get("trackable") or 0.0) < TRACKABLE_FLOOR:
@@ -122,6 +136,13 @@ def main() -> int:
             "cadence": round(float((rec or {}).get("cadence") or 0), 4),
             "period_s": round(float((rec or {}).get("period_s") or 0), 3),
             "n_chunks": len((rec or {}).get("segments") or []),
+            # how the cadence was found, so downstream can weight a chunk
+            # found on one finger at gate 0.20 below a clean wrist cadence
+            "signal": (rec or {}).get("signal", ""),
+            "gate": (rec or {}).get("min_strength", ""),
+            "recurrence": (rec or {}).get("recurrence", ""),
+            "recurrence_p": (rec or {}).get("recurrence_p", ""),
+            "excluded_reason": (rec or {}).get("excluded", ""),
             "job_family": m.get("job_family", ""),
             "business_name": m.get("business_name", ""),
         })
@@ -135,8 +156,8 @@ def main() -> int:
     for r in rows:
         tally[r["status"]] = tally.get(r["status"], 0) + 1
     print(f"{len(rows)} episodes -> {args.out}")
-    for k in ("ok", "too_few_chunks", "no_cadence", "untrackable",
-              "coarse_rate", "no_keypoints"):
+    for k in ("ok", "excluded", "too_few_chunks", "not_recurrent", "no_cadence",
+              "untrackable", "coarse_rate", "no_keypoints"):
         if k in tally:
             print(f"  {k:<16} {tally[k]:>5}  ({tally[k] / len(rows):5.1%})")
 

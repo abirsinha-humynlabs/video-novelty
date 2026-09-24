@@ -329,7 +329,61 @@ so both operating points can be re-derived from raw labels rather than trusted.
 
 ---
 
-## 00. task2 — cycle-aware chunking (2026-09-21, PARKED)
+## 00. task2 — cycle-aware chunking. DELIVERED 2026-09-24 (19 of the 433).
+
+**Status.** `labelling_results/novelty_result_v2/task2_within_video/` holds 19
+per-episode CSVs, `task2_status_433.csv` (one row per rejected-repetitive
+episode, with the reason and the evidence behind it) and a README. Of the 433:
+
+| status | n | |
+|---|---|---|
+| `ok` | 19 | ≥ 2 chunks whose cuts pass the recurrence test; CSV shipped |
+| `excluded` | 3 | rejected in review by eye (`--exclude`, reason recorded) |
+| `not_recurrent` | 101 | cadence found, but the hand does not return to the same pose at the cuts better than at random cuts |
+| `untrackable` | 20 | no tracked stretch long enough for any channel's period |
+| `coarse_rate` | 290 | keypoints only at step 10 (3 fps) — **upstream: re-run at step 1** |
+
+**What changed on 2026-09-24** (all in `novelty/cycles.py`; the docstrings carry
+the measurements):
+
+1. **Channels.** Cadence is searched on both hands × 8 channels: wrist path,
+   whole-hand articulation (Kabsch residual), signed hand rotation, and the curl
+   of each finger. Work done with the fingers while the wrist is parked
+   (DDY-160 session2/013/seg_001, pushing parts into a press) is invisible to
+   the wrist — 0.426 peak strength against 0.553 on articulation.
+2. **Gate walk.** `min_strength` starts at 0.45 and steps down to a floor of
+   0.20 only when no channel yields 2 chunks. The gate reached and the winning
+   channel are recorded per episode.
+3. **Recurrence test.** Autocorrelation strength is scale-free and cannot tell a
+   1 s pick-and-drop or a hammer blow from jitter at the same rate. A candidate
+   is accepted only if the pose at its cuts recurs better than the same chunks
+   cut at random times (permutation, 200 draws, p ≤ 0.05). Scored against every
+   phase of the cycle, not the midpoint: cuts sit on zero crossings, where a
+   back-and-forth hand is in the same place half a cycle later.
+4. **Harmonic check.** Every 2nd and 3rd cut is also tested. Production had
+   shipped DDY-160 session2/009 cut every 0.33 s — a third of a 1.03 s hammer
+   blow; its coverage (28–34%) is too broken to re-cut, so it is dropped.
+5. **Chunks** are 6 whole cycles, ≥ 1 s (`MIN_CHUNK_S`).
+
+**Cost.** Phase A is now ~3 s per 30 fps episode (was 56 ms): 436 s for the 767
+in the NPZ mirror, 620 of which exit at the frame-rate gate. Phase B unchanged:
+90 chunks in ~20 min at `--workers 2`.
+
+**Known limits.**
+- Walking passes the recurrence test: arm swing returns the hand every stride.
+- Work that hides the hands (large sheets passed side to side) breaks tracking
+  every 2–5 s, and a period needs ~5 unbroken cycles. CPY-007 session2/013 is
+  the example; a head-IMU channel was tried and is too weak to single out the
+  work (~6 s rhythm everywhere in the clip). Needs an occlusion-proof channel
+  and fewer cycles per chunk — both change every episode's chunks.
+- Cuts are "workable, not precise" (reviewer, 2026-09-24).
+- The stale 009 CSV and 25 superseded chunk files are still on S3 pending a
+  decision to delete; the S3 README flags 009.
+
+**Regenerate:** `run_v2.py phase-a --npz-dir … --out … --exclude review_exclude.json`,
+then `phase-b`, `phase-c`, `task2_status.py --cohort repetitive_433.json --s3 …`.
+
+### Background (2026-09-21/22)
 
 > **Parked on frame rate, checked 2026-09-22.** `model_output/` now holds 522
 > episodes, newest write 2026-09-22 00:19 UTC — and `step`/`fps` read out of

@@ -65,6 +65,13 @@ PROD_NPZ_PREFIXES = (
 )
 N_CYCLES = 6
 
+#: Shortest chunk worth comparing. One second, because the fastest real work
+#: cycles are about that: a screw picked from one tray and dropped in the tray
+#: beside it, again and again. Jitter at the same rate is rejected by the
+#: per-chunk recurrence test in `analyse_adaptive`, not by duration -- a duration
+#: floor high enough to exclude jitter would also exclude that work.
+MIN_CHUNK_S = 1.0
+
 #: Only full-rate tracks are accepted. Set to 1 deliberately: the hand detector
 #: must run at the source frame rate (step=1, 30 fps) for cycle cutting to mean
 #: anything.
@@ -148,6 +155,15 @@ def phase_a(args):
                                            recursive=True))
                if "_head" not in os.path.basename(p)]
     print(f"phase A: {len(kps)} keypoint files", flush=True)
+    # Episodes a reviewer has looked at and rejected. Keyed by episode name,
+    # valued by the reason. They are still analysed, so the record says what
+    # the analysis found, but their chunks are moved aside: phases B and C only
+    # act on `segments`, so an excluded episode is never embedded or written,
+    # and the status report says why instead of reporting it as no-cadence.
+    exclude = {}
+    if getattr(args, "exclude", None):
+        exclude = json.load(open(args.exclude))
+        print(f"  excluding {len(exclude)} reviewed episode(s)", flush=True)
     index = {}
     t0 = time.time()
     for kp in kps:
@@ -166,12 +182,22 @@ def phase_a(args):
             continue
         try:
             tr = C.load_tracks(kp, rec["head"])
-            # Let analyse pick the hand: it tries both and keeps whichever
-            # yields more cadenced footage. Choosing here on coverage alone was
-            # close but not the same thing, and passing a period_hint computed
-            # for the pre-chosen hand would have pinned the answer to it.
-            an = C.analyse(tr)
-            segs = C.segment_by_cycles(an, n_cycles=N_CYCLES)
+            # Let the analysis pick the hand AND the channel: it tries both
+            # hands across the wrist, whole-hand articulation, hand rotation
+            # and each of the five fingers, at the strictest gate first, and
+            # only loosens the gate when nothing is found above it. Choosing
+            # here on coverage alone was close but not the same thing, and
+            # passing a period_hint computed for the pre-chosen hand would have
+            # pinned the answer to it.
+            an = C.analyse_adaptive(tr, n_cycles=N_CYCLES, min_chunks=2,
+                                    min_chunk_s=MIN_CHUNK_S)
+            # Ship only an ACCEPTED result's chunks. When nothing passes the
+            # recurrence test the analysis still comes back -- the best
+            # near-miss, so the status report can say why -- and its chunks
+            # must not be mistaken for accepted ones. And never a fresh
+            # segment_by_cycles, which would put the rejected chunks back.
+            accepted = an.recurrence_p <= C.RECURRENCE_ALPHA
+            segs = an.segments if accepted else []
             rec.update(
                 duration_s=round(an.duration_s, 2), fps=tr.fps,
                 hand="RIGHT" if an.hand == C.RIGHT else "LEFT",
@@ -182,15 +208,30 @@ def phase_a(args):
                 trackable=round(an.trackable_fraction, 3),
                 cadence=round(an.cadence_fraction, 3),
                 n_boundaries=len(an.boundaries),
+                # HOW the cadence was found, not just that it was. A clip found
+                # on the wrist at 0.45 and one found on the ring finger at 0.25
+                # both produce chunks and are not equally good evidence; without
+                # these two the CSVs cannot tell them apart.
+                signal=an.signal,
+                min_strength=round(an.min_strength, 3),
+                # the physical check on the cuts: pooled pose recurrence at the
+                # cut points and its permutation p-value against random cuts
+                recurrence=(round(float(an.recurrence), 3)
+                            if np.isfinite(an.recurrence) else None),
+                recurrence_p=round(float(an.recurrence_p), 3),
                 # each segment carries its OWN period, not the clip median: the
                 # operator speeds up, slows down and adds sub-steps, so a
                 # constant figure here is what made a 6-cycle chunk read as a
                 # 6-second cycle in the output.
                 segments=[[round(s.t0, 3), round(s.t1, 3), s.n_cycles,
-                           round(s.period_s, 3)] for s in segs],
+                           round(s.period_s, 3), round(s.recurrence, 3)]
+                          for s in segs],
             )
         except Exception as exc:                                   # noqa: BLE001
             rec.update(error=repr(exc)[:200], segments=[])
+        if name in exclude:
+            rec.update(excluded=exclude[name],
+                       excluded_segments=rec.get("segments", []), segments=[])
         index[name] = rec
     dt = time.time() - t0
     with open(os.path.join(args.out, "segments.json"), "w") as fh:
@@ -482,7 +523,8 @@ def phase_drain(args):
         seen = len(got)
         print(f"\ndrain[{it}] {time.strftime('%H:%M:%S')}  npz={len(got)} (+{new})",
               flush=True)
-        a = argparse.Namespace(npz_dir=args.npz_dir, out=args.state, sync_prod=False)
+        a = argparse.Namespace(npz_dir=args.npz_dir, out=args.state, sync_prod=False,
+                               exclude=getattr(args, "exclude", None))
         phase_a(a)
 
         now = _comparable_set(args.state)
@@ -522,7 +564,11 @@ def main():
     a = sub.add_parser("phase-a"); a.add_argument("--npz-dir", required=True)
     a.add_argument("--sync-prod", action="store_true",
                    help="first mirror new npz from the prod prefix (re-runnable)")
-    a.add_argument("--out", default="state"); a.set_defaults(fn=phase_a)
+    a.add_argument("--out", default="state")
+    a.add_argument("--exclude", default=None,
+                   help="JSON {episode name: reason} of reviewed episodes whose "
+                        "chunks must not ship")
+    a.set_defaults(fn=phase_a)
     b = sub.add_parser("phase-b"); b.add_argument("--state", default="state")
     b.add_argument("--no-upload", action="store_true")
     b.add_argument("--workers", type=int, default=1,
@@ -546,6 +592,8 @@ def main():
     d.add_argument("--max-hours", type=float, default=11.0)
     d.add_argument("--stop-after-quiet", type=int, default=12)
     d.add_argument("--no-upload", action="store_true")
+    d.add_argument("--exclude", default=None,
+                   help="as for phase-a; carried into every cycle")
     d.set_defaults(fn=phase_drain)
     args = ap.parse_args()
     return args.fn(args)
