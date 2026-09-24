@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 import numpy as np
@@ -249,11 +250,31 @@ def find_video(name):
     return None, None
 
 
-def embed_episode(rec, sigdir, upload=True):
+#: One encoder for the whole process, and one lock around the GPU section.
+#: Workers overlap the parts that are I/O and CPU -- the video download and the
+#: ffmpeg cut, which together are the bulk of an episode -- while the DINOv2
+#: pass stays serialised. Sharing a torch module across threads without the lock
+#: is the kind of thing that works until it silently does not, and the GPU is
+#: not the bottleneck anyway (2.9 s/chunk against 5.7 s of ffmpeg).
+_ENC = None
+_ENC_LOCK = threading.Lock()
+_GPU_LOCK = threading.Lock()
+
+
+def _encoder(cfg):
+    global _ENC
+    with _ENC_LOCK:
+        if _ENC is None:
+            from novelty.encoders.base import get_appearance_encoder
+            _ENC = get_appearance_encoder(cfg.appearance.encoder,
+                                          **cfg.appearance.encoder_kwargs)
+    return _ENC
+
+
+def embed_episode(rec, sigdir, upload=True, data_prefix=None):
     """Download video, cut the cycle chunks, DINOv2 them, push chunks to S3."""
     from novelty.config import Config
     from novelty.signature import build_signatures
-    from novelty.encoders.base import get_appearance_encoder
 
     name, segs = rec["name"], rec["segments"]
     out = os.path.join(sigdir, name)
@@ -286,7 +307,8 @@ def embed_episode(rec, sigdir, upload=True):
         os.remove(src)
 
         if upload:
-            sh(["aws", "s3", "sync", cdir, f"{S3_DATA_PREFIX}/{name}/chunks",
+            dest = (data_prefix or S3_DATA_PREFIX).rstrip("/")
+            sh(["aws", "s3", "sync", cdir, f"{dest}/{name}/chunks",
                 "--only-show-errors"], profile=WRITE_PROFILE or None)
 
         # appearance only: the task axis is switched off, so V-JEPA2 and the flow
@@ -294,10 +316,11 @@ def embed_episode(rec, sigdir, upload=True):
         cfg = Config.load("configs/gpu.yaml")
         cfg.motion.enabled = False
         cfg.motion.clip_encoder = None
-        enc = get_appearance_encoder(cfg.appearance.encoder, **cfg.appearance.encoder_kwargs)
+        enc = _encoder(cfg)
         os.makedirs(out, exist_ok=True)
         for f in sorted(glob.glob(f"{cdir}/*.mp4")):
-            sigs = build_signatures(f, cfg=cfg, appearance_encoder=enc)
+            with _GPU_LOCK:
+                sigs = build_signatures(f, cfg=cfg, appearance_encoder=enc)
             for s in sigs:
                 s.save(os.path.join(out, f"{os.path.basename(f)[:-4]}.npz"))
                 break
@@ -308,21 +331,39 @@ def embed_episode(rec, sigdir, upload=True):
 
 
 def phase_b(args):
+    import concurrent.futures as cf
+
     index = json.load(open(os.path.join(args.state, "segments.json")))
     todo = [r for r in index.values() if len(r.get("segments", [])) >= 2]
     todo.sort(key=lambda r: -len(r["segments"]))
     sigdir = os.path.join(args.state, "signatures")
     os.makedirs(sigdir, exist_ok=True)
-    print(f"phase B: {len(todo)} episodes with >=2 chunks", flush=True)
+    workers = max(1, int(getattr(args, "workers", 1) or 1))
+    print(f"phase B: {len(todo)} episodes with >=2 chunks, {workers} worker(s)",
+          flush=True)
     stats = {}
-    for i, rec in enumerate(todo, 1):
+    done = 0
+
+    def run(rec):
         try:
-            status, dt = embed_episode(rec, sigdir, upload=not args.no_upload)
+            return rec, *embed_episode(rec, sigdir, upload=not args.no_upload,
+                                       data_prefix=getattr(args, "data_prefix", None))
         except Exception as exc:                                   # noqa: BLE001
-            status, dt = f"ERROR {exc!r}"[:90], 0.0
-        stats[status.split()[0]] = stats.get(status.split()[0], 0) + 1
-        print(f"  [{i}/{len(todo)}] {rec['name'][:52]:<54} "
-              f"{len(rec['segments']):>3} chunks  {status:<10} {dt:6.1f}s", flush=True)
+            return rec, f"ERROR {exc!r}"[:90], 0.0
+
+    # Each episode is independent and writes only under its own name, so the
+    # only shared state is the GPU (locked inside embed_episode) and the disk.
+    # Workers past ~2-3 do not help on a 4 vCPU box: one ffmpeg already
+    # multithreads across every core, measured at 19.8 s for 9 chunks on 4
+    # parallel against 20.1 s serial. The win here is overlapping the S3
+    # download of one episode with the cut of another.
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        for rec, status, dt in ex.map(run, todo):
+            done += 1
+            stats[status.split()[0]] = stats.get(status.split()[0], 0) + 1
+            print(f"  [{done}/{len(todo)}] {rec['name'][:52]:<54} "
+                  f"{len(rec['segments']):>3} chunks  {status:<10} {dt:6.1f}s",
+                  flush=True)
     print(f"  {stats}")
     return 0
 
@@ -383,25 +424,49 @@ def phase_c(args):
             w.writeheader(); w.writerows(rows)
     # task2 subprefix, not the novelty_result_v2 root: these are per-episode
     # within-video CSVs and must not land beside task1's whole-video pair files.
-    check_s3_destination(S3_TASK2_PREFIX)
-    sh(["aws", "s3", "sync", outdir, S3_TASK2_PREFIX, "--only-show-errors"],
+    dest = (getattr(args, "s3_prefix", None) or S3_TASK2_PREFIX).rstrip("/")
+    check_s3_destination(dest)
+    sh(["aws", "s3", "sync", outdir, dest, "--only-show-errors"],
        profile=WRITE_PROFILE or None)
-    print(f"  wrote {len(per_ep)} CSVs -> {S3_TASK2_PREFIX}")
+    print(f"  wrote {len(per_ep)} CSVs -> {dest}")
     return 0
 
 
-def phase_drain(args):
-    """Poll the growing prod prefix and process whatever has arrived.
+def _comparable_set(state):
+    """The episodes that currently qualify for phase B, as a comparable key.
 
-    The hand-detection model is still writing, so a single batch run would
-    either wait idle for hours or miss most episodes. Each cycle re-syncs
-    (cheap: sync skips what is local), re-segments (89 ms/episode), embeds only
-    newly-eligible episodes (phase B is idempotent via a per-episode `done`
-    marker), and rewrites all CSVs. Safe to kill and restart at any point.
+    Includes the chunk count, so an episode that gains chunks from new
+    keypoints counts as a change even though it was already eligible.
+    """
+    try:
+        seg = json.load(open(os.path.join(state, "segments.json")))
+    except Exception:                                              # noqa: BLE001
+        return frozenset()
+    return frozenset((n, len(r.get("segments") or []))
+                     for n, r in seg.items() if len(r.get("segments") or []) >= 2)
+
+
+def phase_drain(args):
+    """Poll the growing prod prefix and process only what actually changed.
+
+    The hand-detection model writes over hours, so a single batch run would
+    either idle or miss most episodes. Each cycle re-syncs (cheap: sync skips
+    what is local) and re-segments (~20 ms/episode, so always worth doing).
+
+    Phases B and C then run ONLY if the set of comparable episodes changed.
+    Phase B was already idempotent via its per-episode `done` marker, but phase
+    C is not: it refits the whitener and null and rewrites every CSV, so a
+    fully-caught-up drain was re-uploading identical files every cycle -- 6 CSVs
+    every 15 minutes, indefinitely, which burns S3 requests and makes the
+    modified time on every object a lie about when its content was produced.
     """
     deadline = time.time() + args.max_hours * 3600
     quiet = 0
     seen = 0
+    last = _comparable_set(args.state)
+    if last:
+        print(f"drain: resuming with {len(last)} comparable episodes already done",
+              flush=True)
     for it in range(1, 10_000):
         if time.time() > deadline:
             print("drain: max-hours reached, stopping", flush=True)
@@ -419,14 +484,28 @@ def phase_drain(args):
               flush=True)
         a = argparse.Namespace(npz_dir=args.npz_dir, out=args.state, sync_prod=False)
         phase_a(a)
-        b = argparse.Namespace(state=args.state, no_upload=args.no_upload)
-        phase_b(b)
-        try:
-            phase_c(argparse.Namespace(state=args.state))
-        except SystemExit:
-            pass
-        except Exception as exc:                                   # noqa: BLE001
-            print(f"  phase C deferred: {str(exc)[:150]}", flush=True)
+
+        now = _comparable_set(args.state)
+        if now == last:
+            print(f"  no change: {len(now)} comparable episodes, nothing to "
+                  f"embed or upload", flush=True)
+        else:
+            added = {n for n, _ in now} - {n for n, _ in last}
+            print(f"  changed: {len(now)} comparable ({len(added)} new episode(s))",
+                  flush=True)
+            b = argparse.Namespace(state=args.state, no_upload=args.no_upload,
+                                   workers=getattr(args, "workers", 1),
+                                   data_prefix=getattr(args, "data_prefix", None))
+            phase_b(b)
+            try:
+                phase_c(argparse.Namespace(state=args.state,
+                                           s3_prefix=getattr(args, "s3_prefix", None)))
+            except SystemExit:
+                pass
+            except Exception as exc:                               # noqa: BLE001
+                print(f"  phase C deferred: {str(exc)[:150]}", flush=True)
+            last = now
+
         quiet = quiet + 1 if new == 0 else 0
         if quiet >= args.stop_after_quiet:
             print(f"drain: no new npz for {quiet} cycles, stopping", flush=True)
@@ -445,12 +524,24 @@ def main():
                    help="first mirror new npz from the prod prefix (re-runnable)")
     a.add_argument("--out", default="state"); a.set_defaults(fn=phase_a)
     b = sub.add_parser("phase-b"); b.add_argument("--state", default="state")
-    b.add_argument("--no-upload", action="store_true"); b.set_defaults(fn=phase_b)
+    b.add_argument("--no-upload", action="store_true")
+    b.add_argument("--workers", type=int, default=1,
+                   help="episodes in flight at once; 2-3 is the useful range on "
+                        "a 4 vCPU box, see phase_b")
+    b.add_argument("--data-prefix", default=None,
+                   help="S3 prefix for the cut chunk media; default S3_DATA_PREFIX")
+    b.set_defaults(fn=phase_b)
     c = sub.add_parser("phase-c"); c.add_argument("--state", default="state")
+    c.add_argument("--s3-prefix", default=None,
+                   help="S3 prefix for the per-episode CSVs; default "
+                        "S3_TASK2_PREFIX. Must be inside the write allowlist.")
     c.set_defaults(fn=phase_c)
     d = sub.add_parser("drain")
     d.add_argument("--npz-dir", required=True)
     d.add_argument("--state", default="state")
+    d.add_argument("--workers", type=int, default=1)
+    d.add_argument("--data-prefix", default=None)
+    d.add_argument("--s3-prefix", default=None)
     d.add_argument("--interval", type=float, default=600.0)
     d.add_argument("--max-hours", type=float, default=11.0)
     d.add_argument("--stop-after-quiet", type=int, default=12)
