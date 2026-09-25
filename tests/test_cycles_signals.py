@@ -30,7 +30,9 @@ def _hand(n_frames=1800, fps=30.0, period_s=2.0, flex=0.8,
             # a mirrored pose: a symmetric +/- flex makes the joint ANGLE the
             # same at both extremes, which halves the measured period. Real
             # fingers do not hyperextend, so this is also the honest shape.
-            a = flex * (1 + np.sin(phase)) / 2 * (j + 1) / 4.0
+            # j = 0 is the knuckle: it stays put, as a real one does, and the
+            # finger bends from it outward, distal joints most
+            a = flex * (1 + np.sin(phase)) / 2 * j / 3.0
             pose[:, joint, 0] = 0.02 * (f - 2)
             pose[:, joint, 1] = 0.02 * (j + 1) * np.cos(a)
             pose[:, joint, 2] = 0.02 * (j + 1) * np.sin(a)
@@ -50,6 +52,12 @@ def _hand(n_frames=1800, fps=30.0, period_s=2.0, flex=0.8,
     return C.HandTracks(fps=fps, n_frames=n_frames,
                         pose={C.LEFT: pose, C.RIGHT: np.full_like(pose, np.nan)},
                         world=False, coverage={C.LEFT: 1.0, C.RIGHT: 0.0})
+
+
+def test_palm_rotation_ignores_the_fingers_curling():
+    """The wrist-level rotation channel must not move when only fingers flex."""
+    rot = C.raw_signal(_hand(period_s=2.0, wrist_amp=0.0, noise=0.0), C.LEFT, "rotation")
+    assert np.nanstd(rot) < 1e-6
 
 
 def test_finger_curl_ignores_where_the_hand_is_and_how_it_points():
@@ -193,3 +201,64 @@ def test_cuts_at_random_times_do_not_pass():
 def test_the_recurrence_test_can_be_disabled():
     an = C.analyse_adaptive(_hand(), n_cycles=6, min_chunks=2, recurrence_alpha=None)
     assert an.segments
+
+
+def test_no_cycle_shorter_than_the_floor_is_accepted():
+    """A 0.4 s oscillation is a PART of a work cycle, not one. With the floor at
+    a second, every accepted chunk must be made of cycles of at least a second
+    -- whole multiples of the fast motion, or nothing."""
+    tr = _hand(period_s=0.4, n_frames=3600)
+    an = C.analyse_adaptive(tr, n_cycles=3, min_chunks=2, min_cycle_s=C.MIN_CYCLE_S)
+    assert all(g.period_s >= C.MIN_CYCLE_S - 1e-9 for g in an.segments)
+    free = C.analyse_adaptive(tr, n_cycles=3, min_chunks=2)
+    assert free.segments and min(g.period_s for g in free.segments) < 0.6   # the floor is what changed
+
+
+def test_a_real_cycle_is_still_found_with_the_floor_and_three_cycles_per_chunk():
+    an = C.analyse_adaptive(_hand(period_s=2.0), n_cycles=3, min_chunks=2,
+                            min_cycle_s=C.MIN_CYCLE_S)
+    assert len(an.segments) >= 2
+    assert an.recurrence_p <= C.RECURRENCE_ALPHA
+    assert all(g.n_cycles == 3 and 1.6 <= g.period_s <= 2.4 for g in an.segments)
+
+
+def test_wrist_is_trusted_before_the_fingers():
+    """With a wrist cadence present, a finger channel must not win."""
+    an = C.analyse_adaptive(_hand(period_s=2.0, wrist_amp=0.25), chunk_s=3.0,
+                            min_chunks=2, min_cycle_s=C.MIN_CYCLE_S, tiers=C.SIGNAL_TIERS)
+    assert an.signal in C.SIGNAL_TIERS[0]
+    assert an.recurrence_p <= C.RECURRENCE_ALPHA
+
+
+def test_fingers_are_the_fallback_when_the_wrist_is_still():
+    an = C.analyse_adaptive(_hand(period_s=2.0, wrist_amp=0.0), chunk_s=3.0,
+                            min_chunks=2, min_cycle_s=C.MIN_CYCLE_S, tiers=C.SIGNAL_TIERS)
+    assert an.segments and an.signal in C.SIGNAL_TIERS[1]
+
+
+def _cuts(every_s, total_s=30.0):
+    b = np.arange(0.0, total_s + 1e-9, every_s)
+    return C.CycleAnalysis(fps=30.0, duration_s=total_s, period_s=every_s, boundaries=b,
+                           cadence_fraction=1.0)
+
+
+def test_a_chunk_is_the_fewest_whole_cycles_reaching_the_minimum():
+    one_s = C.segment_whole_cycles(_cuts(1.0), min_s=3.0)
+    assert one_s and all(g.n_cycles == 3 and abs(g.seconds - 3.0) < 1e-9 for g in one_s)
+    four_s = C.segment_whole_cycles(_cuts(4.0), min_s=3.0)
+    assert four_s and all(g.n_cycles == 1 and abs(g.seconds - 4.0) < 1e-9 for g in four_s)
+    # every chunk starts and ends on a cut
+    b = set(np.round(_cuts(1.0).boundaries, 6))
+    assert all(round(g.t0, 6) in b and round(g.t1, 6) in b for g in one_s)
+
+
+def test_one_cycle_chunks_are_still_tested():
+    """A one-cycle chunk has no cycle inside it; the test must score the run of
+    cuts it belongs to, so a long real cycle is not rejected for being long."""
+    an = C.analyse_adaptive(_hand(period_s=4.0, n_frames=3600), chunk_s=3.0, min_chunks=2,
+                            min_cycle_s=C.MIN_CYCLE_S)
+    assert an.segments and all(g.seconds >= 3.0 - 1e-9 for g in an.segments)
+    # crossing jitter can make one interval a little short, so not every chunk
+    # is exactly one cycle -- but nearly all are
+    assert np.mean([g.n_cycles == 1 for g in an.segments]) >= 0.8
+    assert an.recurrence_p <= C.RECURRENCE_ALPHA

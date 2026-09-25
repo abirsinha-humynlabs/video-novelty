@@ -63,14 +63,22 @@ PROD_NPZ_PREFIXES = (
     "s3://prod-egc-stereo-v2-data/work_items/hand_detection/model_output_fullrate",
     "s3://prod-egc-stereo-v2-data/work_items/hand_detection/model_output_30fps",
 )
-N_CYCLES = 6
+#: Whole cycles per chunk when chunks are cut by count (the drain's legacy path
+#: and anything calling segment_by_cycles directly). Phase A no longer does:
+#: see CHUNK_S.
+N_CYCLES = 3
 
-#: Shortest chunk worth comparing. One second, because the fastest real work
-#: cycles are about that: a screw picked from one tray and dropped in the tray
-#: beside it, again and again. Jitter at the same rate is rejected by the
-#: per-chunk recurrence test in `analyse_adaptive`, not by duration -- a duration
-#: floor high enough to exclude jitter would also exclude that work.
-MIN_CHUNK_S = 1.0
+#: Shortest cycle a chunk may be made of: `novelty.cycles.MIN_CYCLE_S`, one
+#: second -- the fastest real work cycle, a screw picked from one tray and
+#: dropped in the next. Faster "cycles" are parts of a cycle, and cutting on
+#: them puts the cuts mid-task and a video into twenty 1-2 s chunks.
+MIN_CYCLE_S = C.MIN_CYCLE_S
+
+#: A chunk is the fewest WHOLE cycles lasting at least this long: three 1 s
+#: cycles, two 2 s cycles, or one cycle of 3 s or more. No cycle count is
+#: imposed (reviewer, 2026-09-24: the count is not the point, the cut is), but
+#: every chunk still starts and ends on a cut.
+CHUNK_S = 3.0
 
 #: Only full-rate tracks are accepted. Set to 1 deliberately: the hand detector
 #: must run at the source frame rate (step=1, 30 fps) for cycle cutting to mean
@@ -189,8 +197,11 @@ def phase_a(args):
             # here on coverage alone was close but not the same thing, and
             # passing a period_hint computed for the pre-chosen hand would have
             # pinned the answer to it.
-            an = C.analyse_adaptive(tr, n_cycles=N_CYCLES, min_chunks=2,
-                                    min_chunk_s=MIN_CHUNK_S)
+            # wrist-level channels get every gate before any finger channel
+            # is tried (C.SIGNAL_TIERS): cutting on a twitching thumb inside a
+            # 2 s task was the commonest failure in review
+            an = C.analyse_adaptive(tr, min_chunks=2, min_cycle_s=MIN_CYCLE_S,
+                                    chunk_s=CHUNK_S, tiers=C.SIGNAL_TIERS)
             # Ship only an ACCEPTED result's chunks. When nothing passes the
             # recurrence test the analysis still comes back -- the best
             # near-miss, so the status report can say why -- and its chunks
@@ -417,7 +428,14 @@ def phase_c(args):
     from novelty.metrics.distance import cosine, chamfer, gaussian_bhattacharyya
 
     sigdir = os.path.join(args.state, "signatures")
-    eps = sorted(d for d in glob.glob(f"{sigdir}/*") if os.path.isdir(d))
+    # Only episodes that CURRENTLY have chunks. Signatures persist on disk
+    # across re-runs (phase B caches them), so an episode excluded after review,
+    # or one whose cuts no longer pass, still has a signature folder -- and
+    # globbing folders would quietly write its CSV again.
+    index = json.load(open(os.path.join(args.state, "segments.json")))
+    live = {n for n, r in index.items() if len(r.get("segments") or []) >= 2}
+    eps = sorted(d for d in glob.glob(f"{sigdir}/*")
+                 if os.path.isdir(d) and os.path.basename(d) in live)
     per_ep = {}
     for d in eps:
         files = sorted(glob.glob(f"{d}/*.npz"))

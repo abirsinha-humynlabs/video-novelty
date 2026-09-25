@@ -45,6 +45,11 @@ import numpy as np
 #: 13-16 ring, 17-20 pinky.
 WRIST = 0
 MIDDLE_MCP = 9
+#: Wrist plus the four finger knuckles: the rigid part of the hand. Flexing a
+#: finger moves none of these, so a rotation fitted to them is the hand turning
+#: at the wrist, not the fingers curling. The thumb base (1) is left out
+#: because it moves with the thumb.
+PALM = (0, 5, 9, 13, 17)
 LEFT, RIGHT = 0, 1
 
 
@@ -340,7 +345,8 @@ def _kabsch(pose: np.ndarray):
     if good.sum() < 64:
         return None, None, None
     X = pose[good]
-    C = X - X[:, WRIST:WRIST + 1, :]
+    wrist = 0                                     # the wrist is joint 0 of either point set
+    C = X - X[:, wrist:wrist + 1, :]
     # scale-normalise: hand size varies with distance from the camera, and an
     # unnormalised residual would then encode reach rather than articulation
     scale = np.linalg.norm(C, axis=(1, 2), keepdims=True) / np.sqrt(C.shape[1])
@@ -378,6 +384,18 @@ SIGNAL_NAMES = ("wrist", "articulation", "rotation",
                 "curl_thumb", "curl_index", "curl_middle", "curl_ring", "curl_pinky")
 
 
+#: The order channels are trusted in. Wrist-level motion -- where the hand goes
+#: and how it turns -- is tried at every gate before any finger channel is. The
+#: finger channels see motion the wrist cannot, but also motion that is not the
+#: task: of the 102 episodes whose cuts failed the recurrence test, 87 had been
+#: cut on articulation or a finger curl, typically at 0.2-0.4 s -- a thumb
+#: twitching inside a 2 s task (reviewer, 2026-09-24: "too finger aggressive").
+#: A finger channel is used only when no wrist-level channel yields a cadence.
+SIGNAL_TIERS = (("wrist", "rotation"),
+                ("articulation", "curl_thumb", "curl_index", "curl_middle",
+                 "curl_ring", "curl_pinky"))
+
+
 def raw_signal(tracks: HandTracks, hand: int, name: str = "wrist") -> Optional[np.ndarray]:
     """The undetrended 1-D channel for one hand. See ``SIGNAL_NAMES``."""
     pose = tracks.pose[hand]
@@ -394,7 +412,12 @@ def raw_signal(tracks: HandTracks, hand: int, name: str = "wrist") -> Optional[n
     if name.startswith("curl_"):
         return finger_curl(pose, name[len("curl_"):])
     if name in ("articulation", "rotation"):
-        good, resid, rotvec = _kabsch(pose)
+        # Rotation is fitted to the PALM only. Fitted to all 21 joints -- most
+        # of them on the fingers -- it turned finger flexion into "hand
+        # rotation": a synthetic hand with a motionless wrist and curling
+        # fingers won on this channel, which put finger motion into the
+        # wrist-level tier. Articulation keeps all joints: it IS the fingers.
+        good, resid, rotvec = _kabsch(pose[:, list(PALM), :] if name == "rotation" else pose)
         if good is None:
             return None
         out = np.full(len(pose), np.nan)
@@ -610,7 +633,7 @@ def analyse(tracks: HandTracks, *, hand: Optional[int] = None, min_strength: flo
     return _assemble(probed, fps, n, P, min_strength, trackable, hand, signal)
 
 
-def _probe(sig, runs, fps, P, step, window_s, search_factor):
+def _probe(sig, runs, fps, P, step, window_s, search_factor, lo_floor=0.0):
     """Everything about a channel that does NOT depend on the gate.
 
     Separated out because the adaptive search reuses it: `local_period` is the
@@ -626,7 +649,7 @@ def _probe(sig, runs, fps, P, step, window_s, search_factor):
         if not len(probes):
             continue
         pv = np.array([local_period(seg, fps, int(i), window_s,
-                                    lo_s=P / search_factor,
+                                    lo_s=max(P / search_factor, lo_floor),
                                     hi_s=P * search_factor) for i in probes])
         zc = np.nonzero((seg[:-1] <= 0) & (seg[1:] > 0))[0] + 1
         out.append((a, len(seg), probes, pv[:, 0], pv[:, 1], zc))
@@ -849,6 +872,19 @@ def recurrence_test(pose: np.ndarray, fps: float, segments: List[Segment],
     return observed, (beat + 1) / (n_null + 1), per_chunk
 
 
+#: Shortest cycle the adaptive search will accept, when the caller asks for one.
+#: A work cycle is a whole task done once -- a screw picked from one tray and
+#: dropped in the next -- and the fastest of those take about a second. What
+#: repeats faster is a PART of a cycle: a finger tap inside a push, a sub-step
+#: of a reach. Found at that rate, the cuts land mid-task, and a chunk of
+#: 0.2-0.4 s "cycles" is 1-2 s long and one of twenty in the video. Measured on
+#: the 102 episodes whose cuts failed the recurrence test: 99 had a sub-second
+#: cycle, and the four a reviewer confirmed DO repeat (2026-09-24) were read at
+#: 0.20-0.87 s with pair similarity 0.96-0.97 -- the video repeats, the cut
+#: points do not, because they sit on a fraction of the cycle.
+MIN_CYCLE_S = 1.0
+
+
 #: Gates the adaptive search walks down, strictest first. It stops at the first
 #: one that yields enough chunks, so an episode with clean cadence is still
 #: judged at 0.45 and only genuinely marginal work is measured loosely.
@@ -863,9 +899,12 @@ GATES = (0.45, 0.40, 0.35, 0.30, 0.25, 0.20)
 
 def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int = 2,
                      min_chunk_s: float = 0.0,
+                     min_cycle_s: float = 0.0,
+                     chunk_s: Optional[float] = None,
                      recurrence_alpha: Optional[float] = RECURRENCE_ALPHA,
                      gates: Tuple[float, ...] = GATES,
                      signals: Tuple[str, ...] = SIGNAL_NAMES,
+                     tiers: Optional[Tuple[Tuple[str, ...], ...]] = None,
                      probe_step_s: Optional[float] = None,
                      search_factor: float = 2.5) -> CycleAnalysis:
     """Find cadence on whichever hand and channel carries it, relaxing the gate
@@ -896,6 +935,20 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
     report WHY, and its ``segments`` are the near-miss's chunks: check
     ``recurrence_p <= RECURRENCE_ALPHA`` before shipping them.
 
+    ``min_cycle_s`` is the shortest CYCLE accepted (see ``MIN_CYCLE_S``). It is
+    applied twice: the period search never proposes a shorter one, and a chunk
+    whose own cycle -- its span over its cycle count -- falls below it is
+    dropped, so a chunk is always a whole number of cycles of at least this
+    length. Distinct from ``min_chunk_s``, which bounds the chunk, not the cycle:
+    six 0.2 s "cycles" make a 1.2 s chunk that passes any sensible chunk floor.
+
+    ``tiers``, when given, orders the channels (see ``SIGNAL_TIERS``): every
+    gate is tried on the first tier's channels before any channel of the next
+    tier is considered at all. ``signals`` is ignored then.
+
+    ``chunk_s``, when given, replaces the fixed ``n_cycles`` per chunk with
+    ``segment_whole_cycles``: the fewest whole cycles lasting ``chunk_s``.
+
     ``min_chunk_s`` rejects a candidate whose chunks are too short to compare,
     and it is applied DURING the search rather than as a filter afterwards: a
     channel locked onto a 0.2 s oscillation and one that found a 4 s work cycle
@@ -917,12 +970,32 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
     weaker evidence than the number alone suggests.
     """
     best_effort: Optional[CycleAnalysis] = None
+    for tier in (tiers or (signals,)):
+        got = _search_tier(tracks, tier, n_cycles, min_chunks, min_chunk_s, min_cycle_s,
+                           chunk_s, recurrence_alpha, gates, probe_step_s, search_factor)
+        found, near = got
+        if found is not None:
+            return found
+        if near is not None and (best_effort is None or near[0] > best_effort[0]):
+            best_effort = near
+    if best_effort is not None:
+        return best_effort[1]
+    return CycleAnalysis(fps=tracks.fps, duration_s=tracks.n_frames / tracks.fps,
+                         period_s=0.0, boundaries=np.zeros(0), cadence_fraction=0.0,
+                         trackable_fraction=0.0, min_strength=gates[-1])
+
+
+def _search_tier(tracks, signals, n_cycles, min_chunks, min_chunk_s, min_cycle_s,
+                 chunk_s, recurrence_alpha, gates, probe_step_s, search_factor):
+    """The gate walk over one tier of channels. Returns (accepted, near-miss)."""
+    best_effort = None
     cache = []
     for hand in (LEFT, RIGHT):
         if tracks.coverage.get(hand, 0.0) <= 0.0:
             continue
         for name in signals:
-            P = estimate_period(tracks, hand=hand, signal=name)[0]
+            P = estimate_period(tracks, hand=hand, signal=name,
+                                lo_s=max(period_floor(tracks.fps), min_cycle_s))[0]
             if P <= 0:
                 continue
             window_s = WINDOW_REPS * P
@@ -934,7 +1007,8 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
                 continue
             trackable = float(sum(b - a for a, b in runs) / tracks.n_frames)
             step = max(int((probe_step_s if probe_step_s else P / 2.0) * tracks.fps), 1)
-            probed = _probe(sig, runs, tracks.fps, P, step, window_s, search_factor)
+            probed = _probe(sig, runs, tracks.fps, P, step, window_s, search_factor,
+                            lo_floor=min_cycle_s)
             if probed:
                 cache.append((hand, name, P, trackable, probed))
 
@@ -943,9 +1017,7 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
         for hand, name, P, trackable, probed in cache:
             an = _assemble(probed, tracks.fps, tracks.n_frames, P, gate,
                            trackable, hand, name)
-            segs = segment_by_cycles(an, n_cycles=n_cycles)
-            if min_chunk_s > 0:
-                segs = [g for g in segs if g.seconds >= min_chunk_s]
+            segs = _keep(_chunk(an, n_cycles, chunk_s), min_chunk_s, min_cycle_s)
             an.segments = segs
             n = len(segs)
             # keep the strongest near-miss so a failed search still explains
@@ -969,17 +1041,12 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
         # strict gate must not block a real one at a looser gate.
         for _, an in sorted(at_gate, key=lambda t: t[0], reverse=True):
             if recurrence_alpha is None:
-                return an
-            got = _fundamental(tracks, an, n_cycles, min_chunks, min_chunk_s,
-                               recurrence_alpha)
+                return an, best_effort
+            got = _fundamental(tracks, an, n_cycles, min_chunks, min_chunk_s, min_cycle_s,
+                               recurrence_alpha, chunk_s)
             if got is not None:
-                return got
-
-    if best_effort is not None:
-        return best_effort[1]
-    return CycleAnalysis(fps=tracks.fps, duration_s=tracks.n_frames / tracks.fps,
-                         period_s=0.0, boundaries=np.zeros(0), cadence_fraction=0.0,
-                         trackable_fraction=0.0, min_strength=gates[-1])
+                return got, best_effort
+    return None, best_effort
 
 
 #: Multiples of a candidate's cycle the recurrence test also tries, to catch a
@@ -987,8 +1054,15 @@ def analyse_adaptive(tracks: HandTracks, *, n_cycles: int = 6, min_chunks: int =
 HARMONICS = (1, 2, 3)
 
 
+def _keep(segs: List[Segment], min_chunk_s: float, min_cycle_s: float) -> List[Segment]:
+    """Chunks long enough to compare, made of cycles long enough to be cycles."""
+    return [g for g in segs
+            if g.seconds >= min_chunk_s and g.period_s >= min_cycle_s - 1e-9]
+
+
 def _decimated(an: CycleAnalysis, k: int, n_cycles: int,
-               min_chunk_s: float) -> CycleAnalysis:
+               min_chunk_s: float, min_cycle_s: float = 0.0,
+               chunk_s: Optional[float] = None) -> CycleAnalysis:
     """The same cuts, keeping every ``k``-th one in each cadenced run: the
     candidate re-read at ``k`` times its cycle."""
     if k == 1:
@@ -996,16 +1070,13 @@ def _decimated(an: CycleAnalysis, k: int, n_cycles: int,
     runs = _runs(an.boundaries, an.period_s)
     kept = np.concatenate([r[::k] for r in runs]) if runs else np.zeros(0)
     out = replace(an, boundaries=kept, period_s=an.period_s * k, segments=[])
-    segs = segment_by_cycles(out, n_cycles=n_cycles)
-    if min_chunk_s > 0:
-        segs = [g for g in segs if g.seconds >= min_chunk_s]
-    out.segments = segs
+    out.segments = _keep(_chunk(out, n_cycles, chunk_s), min_chunk_s, min_cycle_s)
     return out
 
 
 def _fundamental(tracks: HandTracks, an: CycleAnalysis, n_cycles: int,
-                 min_chunks: int, min_chunk_s: float,
-                 alpha: float) -> Optional[CycleAnalysis]:
+                 min_chunks: int, min_chunk_s: float, min_cycle_s: float,
+                 alpha: float, chunk_s: Optional[float] = None) -> Optional[CycleAnalysis]:
     """Accept a candidate at the cycle length where the hand really returns.
 
     Autocorrelation can lock onto a harmonic of the work, and HARMONIC_FRAC
@@ -1027,14 +1098,18 @@ def _fundamental(tracks: HandTracks, an: CycleAnalysis, n_cycles: int,
     """
     tried = []
     for k in HARMONICS:
-        cand = _decimated(an, k, n_cycles, min_chunk_s)
+        cand = _decimated(an, k, n_cycles, min_chunk_s, min_cycle_s, chunk_s)
         if len(cand.segments) < min_chunks:
             continue
+        # test the runs of consecutive cuts, not the chunks: grouping must not
+        # decide whether the cuts pass (see _cut_runs)
+        runs = _cut_runs(cand.segments)
         obs, pval, per = recurrence_test(tracks.pose[cand.hand], tracks.fps,
-                                         cand.segments, cand.boundaries)
+                                         runs, cand.boundaries)
         cand.recurrence, cand.recurrence_p = obs, pval
-        for g, r in zip(cand.segments, per):
-            g.recurrence = r
+        for g in cand.segments:
+            g.recurrence = next((r for run, r in zip(runs, per)
+                                 if run.t0 - 1e-6 <= g.t0 and g.t1 <= run.t1 + 1e-6), float("nan"))
         tried.append((k, cand))
     good = [(k, c) for k, c in tried
             if c.recurrence_p <= alpha and np.isfinite(c.recurrence)]
@@ -1043,6 +1118,48 @@ def _fundamental(tracks: HandTracks, an: CycleAnalysis, n_cycles: int,
     best = max(c.recurrence for _, c in good)
     floor = HARMONIC_FRAC * best if best > 0 else best
     return min((kc for kc in good if kc[1].recurrence >= floor), key=lambda kc: kc[0])[1]
+
+
+def segment_whole_cycles(an: CycleAnalysis, min_s: float = 3.0) -> List[Segment]:
+    """Each chunk is the FEWEST whole cycles that last at least ``min_s``.
+
+    No cycle count is imposed: a 1 s pick-and-drop gives three-cycle chunks, a
+    4 s assembly one-cycle chunks. What is fixed is that every chunk starts and
+    ends on a cut, so it is always whole cycles. A tail shorter than ``min_s``
+    at the end of a cadenced run is dropped rather than padded.
+    """
+    out: List[Segment] = []
+    for run in _runs(an.boundaries, an.period_s):
+        i = 0
+        while i < len(run) - 1:
+            j = i + 1
+            while j < len(run) and run[j] - run[i] < min_s:
+                j += 1
+            if j >= len(run):
+                break
+            t0, t1 = float(run[i]), float(run[j])
+            out.append(Segment(t0, t1, "cadenced", j - i, (t1 - t0) / (j - i)))
+            i = j
+    return out
+
+
+def _chunk(an: CycleAnalysis, n_cycles: int, chunk_s: Optional[float]) -> List[Segment]:
+    return (segment_whole_cycles(an, chunk_s) if chunk_s
+            else segment_by_cycles(an, n_cycles=n_cycles))
+
+
+def _cut_runs(segs: List[Segment]) -> List[Segment]:
+    """Adjacent chunks merged back into the runs of consecutive cuts they came
+    from. The recurrence test scores these, not the chunks, so how cuts are
+    grouped into chunks cannot change whether the cuts pass -- and a one-cycle
+    chunk, which has no cycle inside it to score, is still tested."""
+    out: List[Segment] = []
+    for g in sorted(segs, key=lambda g: g.t0):
+        if out and abs(g.t0 - out[-1].t1) < 1e-6:
+            out[-1] = Segment(out[-1].t0, g.t1, "cadenced", out[-1].n_cycles + g.n_cycles)
+        else:
+            out.append(Segment(g.t0, g.t1, "cadenced", g.n_cycles))
+    return out
 
 
 def segment_by_duration(an: CycleAnalysis, target_s: float = 10.0) -> List[Segment]:
